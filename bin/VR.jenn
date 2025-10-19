@@ -1,0 +1,133 @@
+Node {
+    int self = 0;
+    List replicas = [];
+    
+    int view_number = 0;
+    int status = 0; // 0 is normal, 1 is view-change, 2 is recovering
+    int op_number = 0;
+
+    List log = [];
+    int commit_number = 0;
+
+    int normal_view = 0;
+
+    map<int, int> prepare_ok_counts = {};
+    int start_view_change_count = 0;
+    int do_view_change_count = 0;
+    List do_view_change_messages = [];
+    int recovery_response_count = 0;
+
+    int ticks_since_heartbeat = 0;
+    int HEARTBEAT_TIMEOUT = 5;
+
+    func Init(me, peers) -> None {
+        self = me;
+
+        for (i = 0; i < len(peers); i = i+1) {
+            replicas = append(replicas, peers[i]);
+        }
+
+        var i = primary_of(view_number);
+    }
+
+    func primary_of(v) -> int {
+        return replicas[v % len(replicas)];
+    }
+
+    func Prepare(other_view, other_request, other_op_number, other_commit_number) -> None {
+        ticks_since_heartbeat = 0;
+
+        if (other_view == view_number && other_op_number == op_number + 1) {
+            op_number = op_number + 1;
+            log = append(log, {"view": view_number, "op": other_request});
+
+            // The backup can update its commit number from the primary's message.
+            if (other_commit_number > commit_number) {
+                commit_number = other_commit_number;
+            }
+
+            // Acknowledge the request by sending a PrepareOK to the primary.
+            var primary_node = primary_of(view_number);
+            rpc_async_call(primary_node, PrepareOK(view_number, op_number, self));
+        }   
+    }
+
+    func PrepareOK(other_view, other_op_number, other_replica_id) -> None {
+        var current_primary = primary_of(view_number);
+
+        // Only the primary for the current view processes PrepareOK messages.
+        if (self == current_primary && other_view == view_number) {
+            if (!(other_op_number exists prepare_ok_counts)) {
+                prepare_ok_counts[other_op_number] = 0;
+            }
+            prepare_ok_counts[other_op_number] = prepare_ok_counts[other_op_number] + 1;
+
+            // The primary waits for f backups to respond. In a system with N=2f+1 replicas,
+            // this constitutes a quorum.
+            var f = (len(replicas) - 1) / 2;
+            
+            // If enough backups have acknowledged and this op is next to be committed...
+            if (prepare_ok_counts[other_op_number] == f && other_op_number > commit_number) {
+                commit_number = other_op_number;
+                
+                // ...broadcast the new commit number to all backups.
+                for (i = 0; i < len(replicas); i = i+1) {
+                    if (replicas[i] != self) {
+                        rpc_async_call(replicas[i], Commit(view_number, commit_number));
+                    }
+                }
+            }
+        }
+    }
+
+    func Commit(other_view, other_commit_number) -> None {
+
+    }
+
+    func StartViewChange(new_view, replica_id) -> None {
+
+    }
+
+    func DoViewChange(new_view, log, normal_view, op_number, commit_number) -> None {
+
+    }
+
+    func StartView(view, log, op_number, commit_number) -> None {
+
+    }
+
+    func Recovery(replica_id, nonce) -> None {
+
+    }
+
+    func RecoveryResponse(nonce, view, log, op_number, commit_number) -> None {
+
+    }
+
+
+    func NewEntry(cmd) -> bool {
+    }
+
+    func Tick() -> None {
+    }
+}
+
+ClientInterface {
+    int primary = 0;
+        
+    func init(dest, replicas) -> None {
+        print("[client] init replica");
+        print(dest);
+
+        print("\n\n");
+
+        primary = primary + 1;
+
+        rpc_call(dest, BASE_NODE_INIT());
+        rpc_async_call(dest, Init(dest, replicas));
+    }
+
+    func newEntry(dest, cmd) -> bool {
+        rpc_call(dest, NewEntry(cmd));
+    }
+}
