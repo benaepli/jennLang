@@ -911,7 +911,7 @@ let exec (state : state) (program : program) (record : record) =
         | VFuture _ -> failwith "Type error VFuture")
     | Print (expr, next) ->
         let v = eval env expr in
-        Printf.printf "%s\n" (to_string_value v);
+        Printf.printf "%s" (to_string_value v);
         record.pc <- next;
         loop ()
     | Break _ -> raise Halt

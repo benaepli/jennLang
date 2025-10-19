@@ -62,9 +62,9 @@
 %right BANG
 %left AND
 %left OR
-%left STAR SLASH PERCENT
-%left PLUS MINUS
 %nonassoc EQUALS_EQUALS NOT_EQUALS LEFT_ANGLE_BRACKET RIGHT_ANGLE_BRACKET LEFT_ANGLE_BRACKET_EQUALS RIGHT_ANGLE_BRACKET_EQUALS EXISTS
+%left PLUS MINUS
+%left STAR SLASH PERCENT
 // %left COMMA
 
 %type <Ast.prog> program
@@ -135,13 +135,9 @@ cond_stmts:
     { i :: el @ [IfElseIf(Bool(true), else_body)] }
 
 rpc_call:
-  | RPC_CALL LEFT_PAREN host = ID COMMA func_call = func_call RIGHT_PAREN
+  | RPC_CALL LEFT_PAREN host = right_side COMMA func_call = func_call RIGHT_PAREN
     { RpcCall(host, func_call) }
-  | RPC_CALL LEFT_PAREN host = STRING COMMA func_call = func_call RIGHT_PAREN
-    { RpcCall(host, func_call) }
-  | RPC_ASYNC_CALL LEFT_PAREN host = ID COMMA func_call = func_call RIGHT_PAREN
-    { RpcAsyncCall(host, func_call) }
-  | RPC_ASYNC_CALL LEFT_PAREN host = STRING COMMA func_call = func_call RIGHT_PAREN
+  | RPC_ASYNC_CALL LEFT_PAREN host = right_side COMMA func_call = func_call RIGHT_PAREN
     { RpcAsyncCall(host, func_call) }
 
 type_def:

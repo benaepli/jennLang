@@ -187,7 +187,7 @@ let rec generate_cfg_from_stmts (stmts : statement list) (cfg : CFG.t)
                           (Instr
                              ( Async
                                  ( LVar "async_future",
-                                   EVar node,
+                                   convert_rhs node,
                                    func_name,
                                    actuals ),
                                await_vertex ))
@@ -205,7 +205,11 @@ let rec generate_cfg_from_stmts (stmts : statement list) (cfg : CFG.t)
                       let async_vertex =
                         CFG.create_vertex cfg
                           (Instr
-                             ( Async (LVar "ret", EVar node, func_name, actuals),
+                             ( Async
+                                 ( LVar "ret",
+                                   convert_rhs node,
+                                   func_name,
+                                   actuals ),
                                next_vert ))
                       in
                       CFG.create_vertex cfg (Pause async_vertex)))
@@ -336,8 +340,12 @@ let rec scan_ast_for_local_vars (stmts : statement list) :
           in
           scan_cond_ast_for_local_vars cond_stmts @ rest_of_local_vars
       | VarDeclInit (var_name, rhs) ->
-          let init_value = match rhs with
-            | FuncCallRHS _ -> EInt 0  (* Placeholder for function call results *)
+          let init_value =
+            match rhs with
+            | FuncCallRHS _ ->
+                (* Placeholder - actual value will be set by CFG execution.
+                   Using EInt 0 instead of evaluating in caller's environment. *)
+                EInt 0
             | _ -> convert_rhs rhs
           in
           (var_name, TString, init_value) :: rest_of_local_vars
@@ -470,11 +478,15 @@ let bootlegged_sync_exec (global_state : state) (prog : program)
     (randomly_drop_msgs : bool) (cut_tail_from_mid : bool)
     (sever_all_to_tail_but_mid : bool) (partition_away_nodes : int list)
     (randomly_delay_msgs : bool) : unit =
+  let count = ref 0 in
   for _ = 0 to 100000 do
-    if not (List.length global_state.records = 0) then
+    if not (List.length global_state.records = 0) then (
+      count := !count + 1;
       schedule_record global_state prog randomly_drop_msgs cut_tail_from_mid
-        sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs
-  done
+        sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs)
+  done;
+  Printf.printf "Executed %d record scheduling iterations\n" !count;
+  Printf.printf "Remaining records: %d\n" (List.length global_state.records)
 
 let parse_file (filename : string) : prog =
   let ic = open_in filename in
@@ -560,7 +572,7 @@ let init_topology (topology : string) (global_state : state) (prog : program) :
         schedule_client global_state prog "init"
           [
             VNode i;
-            VList (ref (List.init (num_servers - 1) (fun i -> VNode i)));
+            VList (ref (List.init num_servers (fun j -> VNode j) |> List.filter (fun node -> match node with VNode n -> n <> i | _ -> true)));
           ]
           0;
         sync_exec global_state prog false false false [] false
@@ -569,7 +581,9 @@ let init_topology (topology : string) (global_state : state) (prog : program) :
 
 let schedule_vr_executions (global_state : state) (prog : program) : unit =
   let scheduler = schedule_client global_state prog in
-  scheduler "newEntry" [ VInt 1; VString "Hello world" ] 0
+  scheduler "newEntry" [ VInt 1; VString "Hello world" ] 0;
+  scheduler "newEntry" [ VNode 0; VString "WON_ELECTION" ] 0;
+  scheduler "newEntry" [ VNode 0; VString "WRITE KEY" ] 0
 
 let init_clients (global_state : state) (prog : program) : unit =
   for i = 0 to num_clients - 1 do
@@ -577,15 +591,17 @@ let init_clients (global_state : state) (prog : program) : unit =
     let init_fn = Env.find prog.client_ops "BASE_CLIENT_INIT" in
     let env = Env.create 91 in
     let record =
-      { pc = init_fn.entry
-      ; node = client_id
-      ; continuation = (fun _ -> ())
-      ; env = env
-      ; id = -1
-      ; x = 0.0
-      ; f = (fun x -> x) }
+      {
+        pc = init_fn.entry;
+        node = client_id;
+        continuation = (fun _ -> ());
+        env;
+        id = -1;
+        x = 0.0;
+        f = (fun x -> x);
+      }
     in
-    global_state.records <- [record];
+    global_state.records <- [ record ];
     sync_exec global_state prog false false false [] false
   done
 

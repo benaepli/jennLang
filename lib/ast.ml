@@ -62,9 +62,9 @@ and literal =
 
 and func_call = FuncCall of string * param list
 
-and rpc_call = 
-  | RpcCall of string * func_call
-  | RpcAsyncCall of string * func_call
+and rpc_call =
+  | RpcCall of rhs * func_call
+  | RpcAsyncCall of rhs * func_call
 
 and lhs = 
   | VarLHS of string
