@@ -319,8 +319,8 @@ and generate_cfg_from_match_stmt (match_exp : rhs) (cases : case_stmt list)
       in
       (case_vert, body_vert)
 
-let rec scan_ast_for_local_vars (stmts : statement list) :
-    (string * expr) list =
+let rec scan_ast_for_local_vars (stmts : statement list) : (string * expr) list
+    =
   match stmts with
   | [] -> []
   | stmt :: rest -> (
@@ -361,8 +361,7 @@ let rec scan_ast_for_local_vars (stmts : statement list) :
       | ForLoopIn (lhs, _, body) ->
           let init_vars =
             match lhs with
-            | TupleLHS vars ->
-                List.map (fun var -> (var, EInt 214)) vars
+            | TupleLHS vars -> List.map (fun var -> (var, EInt 214)) vars
             | VarLHS var -> [ (var, EInt 214) ]
             | _ -> failwith "For loop in must be a variable assignment"
           and body_vars = scan_ast_for_local_vars body in
@@ -572,7 +571,11 @@ let init_topology (topology : string) (global_state : state) (prog : program) :
         schedule_client global_state prog "init"
           [
             VNode i;
-            VList (ref (List.init num_servers (fun j -> VNode j) |> List.filter (fun node -> match node with VNode n -> n <> i | _ -> true)));
+            VList
+              (ref
+                 (List.init num_servers (fun j -> VNode j)
+                 |> List.filter (fun node ->
+                        match node with VNode n -> n <> i | _ -> true)));
           ]
           0;
         sync_exec global_state prog false false false [] false
@@ -647,7 +650,9 @@ let interp (spec : string) (intermediate_output : string)
           | VFuture _ -> Printf.fprintf oc "TODO implement VFuture"
           | VMap _ -> Printf.fprintf oc "TODO implement VMap"
           | VOption _ -> Printf.fprintf oc "TODO implement VOptions"
-          | VList _ -> Printf.fprintf oc "TODO implement VList")
+          | VList _ -> Printf.fprintf oc "TODO implement VList"
+          | VUnit -> Printf.fprintf oc "TODO implement VUnit"
+          | VTuple _ -> Printf.fprintf oc "TODO implement VTuple")
         op.payload;
       Printf.fprintf oc "\n")
     global_state.history;

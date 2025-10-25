@@ -53,6 +53,12 @@ type expr =
   | EPollForAnyResp of expr
   | ENextResp of expr
   | EMin of expr * expr
+  | ETuple of expr list
+  | ETupleAccess of expr * int
+  | EUnit
+  | ENil
+  | EUnwrap of expr
+  | ECoalesce of expr * expr
 [@@deriving ord]
 
 type lhs = LVar of string | LAccess of expr * expr | LTuple of string list
@@ -63,6 +69,7 @@ type instr =
   | Async of lhs * expr * string * expr list (* jenndbg RPC*)
   | Copy of lhs * expr
     (* | Write of string * string (*jenndbg write a value *) *)
+  | StoreTupleAccess of expr * int * expr
 [@@deriving ord]
 
 (* Run-time values *)
@@ -75,6 +82,8 @@ type value =
   | VFuture of value option ref
   | VNode of int
   | VString of string
+  | VUnit
+  | VTuple of value array
 
 (* Run-time value of a left-hand-side *)
 type lvalue =
@@ -160,6 +169,15 @@ let rec to_string_expr (e : expr) : string =
   | ENextResp e -> "NextResp(" ^ to_string_expr e ^ ")"
   | EMin (e1, e2) ->
       "EMin(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
+  | ETuple exprs ->
+      "ETuple(" ^ String.concat ", " (List.map to_string_expr exprs) ^ ")"
+  | ETupleAccess (e, i) ->
+      "ETupleAccess(" ^ to_string_expr e ^ ", " ^ string_of_int i ^ ")"
+  | EUnit -> "EUnit"
+  | ENil -> "ENil"
+  | EUnwrap e -> "EUnwrap(" ^ to_string_expr e ^ ")"
+  | ECoalesce (e1, e2) ->
+      "ECoalesce(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
 
 let to_string_lhs (l : lhs) : string =
   match l with
@@ -176,7 +194,10 @@ let to_string (l : 'a label) : string =
       | Assign (lhs, expr) ->
           "Instr(Assign(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr
           ^ "))"
-      | Copy (_, _) -> "instr copy")
+      | Copy (_, _) -> "instr copy"
+      | StoreTupleAccess (e_tuple, idx, e_val) ->
+          "Instr(StoreTupleAccess(" ^ to_string_expr e_tuple ^ ", "
+          ^ string_of_int idx ^ ", " ^ to_string_expr e_val ^ "))")
   | Pause _ -> "Pause"
   | Await (lhs, expr, _) ->
       "Await(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr ^ ")"
@@ -209,6 +230,11 @@ let rec to_string_value (v : value) : string =
       ^ ")"
   | VNode n -> "VNode(" ^ string_of_int n ^ ")"
   | VString s -> "" ^ s ^ ""
+  | VUnit -> "VUnit"
+  | VTuple arr ->
+      "VTuple("
+      ^ String.concat ", " (List.map to_string_value (Array.to_list arr))
+      ^ ")"
 
 module CFG : sig
   type t (* jenndbg: control flow graph type *)
@@ -360,6 +386,14 @@ let rec eval (env : record_env) (expr : expr) : value =
       | VOption _ ->
           Printf.printf "Collection %s is option, cannot index into using %s\n"
             (to_string_expr c) (to_string_expr k);
+          failwith "EFind eval fail: collection is neither map nor string"
+      | VUnit ->
+          Printf.printf "Collection %s is unit, cannot index into using %s\n"
+            (to_string_expr c) (to_string_expr k);
+          failwith "EFind eval fail: collection is neither map nor string"
+      | VTuple _ ->
+          Printf.printf "Collection %s is tuple, cannot index into using %s\n"
+            (to_string_expr c) (to_string_expr k);
           failwith "EFind eval fail: collection is neither map nor string")
   | ENot e -> (
       match eval env e with
@@ -387,6 +421,8 @@ let rec eval (env : record_env) (expr : expr) : value =
       | VNode n1, VNode n2 -> VBool (n1 = n2)
       | VNode n, VInt i -> VBool (n = i)
       | VInt i, VNode n -> VBool (i = n)
+      | VUnit, VUnit -> VBool true
+      | VOption o1, VOption o2 -> VBool (o1 = o2)
       | VMap _, _ -> failwith "EEqualsEquals fails with map"
       | VFuture _, _ -> failwith "EEqualsEquals fails with VFuture"
       | VList l1, VList l2 ->
@@ -412,10 +448,15 @@ let rec eval (env : record_env) (expr : expr) : value =
           | VMap _ -> failwith "EEqualsEquals eval fail VInt, VMap"
           | VFuture _ -> failwith "EEqualsEquals eval fail VInt, VFuture"
           | VList _ -> failwith "EEqualsEquals eval fail VInt, VList"
-          | VOption _ -> failwith "EEqualsEquals eval fail VInt, VOption")
+          | VOption _ -> VBool false
+          | VUnit -> VBool false
+          | VTuple _ -> VBool false)
       | VBool _, _ -> failwith "EEqualsEquals eval fail VBool"
       | VString _, _ -> failwith "EEqualsEquals eval fail VString"
-      | VNode _, _ -> failwith "EEqualsEquals eval fail VNode")
+      | VNode _, _ -> failwith "EEqualsEquals eval fail VNode"
+      | VUnit, _ | _, VUnit -> VBool false
+      | _, VOption _ -> VBool false
+      | VTuple _, _ -> VBool false)
   | EMap kvp ->
       let rec makemap (kvpairs : (expr * expr) list) : (value, value) Hashtbl.t
           =
@@ -525,7 +566,9 @@ let rec eval (env : record_env) (expr : expr) : value =
       | VMap _, _ -> failwith "EMinus VMap fail"
       | VOption _, _ -> failwith "EMinus VOption fail"
       | VNode _, _ -> failwith "EMinus VNode fail"
-      | VString _, _ -> failwith "EMinus VString fail")
+      | VString _, _ -> failwith "EMinus VString fail"
+      | VUnit, _ -> failwith "EMinus VUnit fail"
+      | VTuple _, _ -> failwith "EMinus VTuple fail")
   | ETimes (e1, e2) -> (
       match (eval env e1, eval env e2) with
       | VInt i1, VInt i2 -> VInt (i1 * i2)
@@ -652,6 +695,30 @@ let rec eval (env : record_env) (expr : expr) : value =
       match (eval env e1, eval env e2) with
       | VInt i1, VInt i2 -> VInt (min i1 i2)
       | _ -> failwith "EMin eval fail")
+  | EUnit -> VUnit
+  | ENil -> VOption None (* nil literal evaluates to VOption None *)
+  | ETuple exprs -> VTuple (Array.of_list (List.map (eval env) exprs))
+  | ETupleAccess (e_tuple, idx) -> (
+      match eval env e_tuple with
+      | VTuple arr -> (
+          try arr.(idx)
+          with Invalid_argument _ ->
+            failwith
+              ("Runtime error: Tuple index " ^ string_of_int idx
+             ^ " out of bounds"))
+      | _ -> failwith "Type error: Attempted tuple access on non-tuple")
+  | EUnwrap e -> (
+      match eval env e with
+      | VOption (Some v) -> v
+      | VOption None -> failwith "Runtime error: Attempted to unwrap nil"
+      | v ->
+          Printf.printf "Unwrap on: %s\n" (to_string_value v);
+          failwith "Type error: Attempted to unwrap non-optional")
+  | ECoalesce (e_opt, e_default) -> (
+      match eval env e_opt with
+      | VOption (Some v) -> v
+      | VOption None -> eval env e_default
+      | _ -> failwith "Type error: Coalesce on non-optional")
 
 let eval_lhs (env : record_env) (lhs : lhs) : lvalue =
   match lhs with
@@ -713,6 +780,18 @@ let exec (state : state) (program : program) (record : record) =
     | Instr (instruction, next) ->
         record.pc <- next;
         (match instruction with
+        | StoreTupleAccess (e_tuple, idx, e_val) ->
+            let v_val = eval env e_val in
+            (match eval env e_tuple with
+            | VTuple arr -> (
+                try arr.(idx) <- v_val
+                with Invalid_argument _ ->
+                  failwith
+                    ("Runtime error: Tuple index " ^ string_of_int idx
+                   ^ " out of bounds for assignment"))
+            | _ ->
+                failwith "Type error: Attempted tuple assignment on non-tuple");
+            loop ()
         | Async (lhs, node, func, actuals) -> (
             match eval env node with
             | VNode node_id | VInt node_id ->
@@ -757,6 +836,8 @@ let exec (state : state) (program : program) (record : record) =
             | VList _ -> failwith "Type error list"
             | VOption _ -> failwith "Type error option"
             | VFuture _ -> failwith "Type error future"
+            | VUnit -> failwith "Type error unit"
+            | VTuple _ -> failwith "Type error tuple"
             | VString role -> (
                 match load role env with
                 | VNode node_id ->
@@ -794,7 +875,9 @@ let exec (state : state) (program : program) (record : record) =
         | VList _ -> failwith "Type error list"
         | VOption _ -> failwith "Type error option"
         | VString _ -> failwith "Type error string"
-        | VNode _ -> failwith "Type error node");
+        | VNode _ -> failwith "Type error node"
+        | VUnit -> failwith "Type error unit"
+        | VTuple _ -> failwith "Type error tuple");
         loop ()
     | Await (lhs, expr, next) -> (
         match eval env expr with
@@ -819,7 +902,9 @@ let exec (state : state) (program : program) (record : record) =
         | VList _ -> failwith "Type error list"
         | VOption _ -> failwith "Type error option"
         | VString _ -> failwith "Type error string"
-        | VNode _ -> failwith "Type error node")
+        | VNode _ -> failwith "Type error node"
+        | VUnit -> failwith "Type error unit"
+        | VTuple _ -> failwith "Type error tuple")
     | Return expr -> record.continuation (eval env expr)
     | Pause next ->
         record.pc <- next;
@@ -898,7 +983,9 @@ let exec (state : state) (program : program) (record : record) =
         | VString _ -> failwith "Type error VString"
         | VNode _ -> failwith "Type error VNode"
         | VOption _ -> failwith "Type error VOption"
-        | VFuture _ -> failwith "Type error VFuture")
+        | VFuture _ -> failwith "Type error VFuture"
+        | VUnit -> failwith "Type error VUnit"
+        | VTuple _ -> failwith "Type error VTuple")
     | Print (expr, next) ->
         let v = eval env expr in
         Printf.printf "%s" (to_string_value v);
@@ -936,6 +1023,8 @@ let schedule_record (state : state) (program : program)
                     | VList _ -> failwith "Type error VList!"
                     | VOption _ -> failwith "Type error VOption!"
                     | VFuture _ -> failwith "Type error VFuture!"
+                    | VUnit -> failwith "Type error VUnit!"
+                    | VTuple _ -> failwith "Type error VTuple!"
                   in
                   let src_node = r.node in
                   let dest_node = node_id in
