@@ -65,16 +65,6 @@ type instr =
     (* | Write of string * string (*jenndbg write a value *) *)
 [@@deriving ord]
 
-(* Static types *)
-type typ =
-  | TInt
-  | TBool
-  | TMap of typ * typ
-  | TOption of typ
-  | TFuture of typ
-  | TNode
-  | TString
-
 (* Run-time values *)
 type value =
   | VInt of int
@@ -304,8 +294,8 @@ type record_env = { local_env : value Env.t; node_env : value Env.t }
 type function_info = {
   entry : CFG.vertex;
   name : string;
-  formals : (string * typ) list;
-  locals : (string * typ * expr) list;
+  formals : string list;
+  locals : (string * expr) list;
 }
 
 (* Representation of program syntax *)
@@ -733,7 +723,7 @@ let exec (state : state) (program : program) (record : record) =
                 let new_env = Env.create 91 in
                 (try
                    List.iter2
-                     (fun (formal, _) actual ->
+                     (fun formal actual ->
                        Env.add new_env formal (eval env actual))
                      formals actuals
                  with Invalid_argument _ ->
@@ -742,11 +732,11 @@ let exec (state : state) (program : program) (record : record) =
                      \                    formals: %s\n\
                      \                    actuals: %s\n"
                      func
-                     (String.concat ", " (List.map fst formals))
+                     (String.concat ", " formals)
                      (String.concat ", " (List.map to_string_expr actuals));
                    failwith "Mismatched arguments in function call");
                 List.iter
-                  (fun (var_name, _, expr) ->
+                  (fun (var_name, expr) ->
                     Env.add new_env var_name (eval env expr))
                   locals;
                 let new_record =
@@ -774,7 +764,7 @@ let exec (state : state) (program : program) (record : record) =
                     let { entry; formals; _ } = function_info func program in
                     let new_env = Env.create 91 in
                     List.iter2
-                      (fun (formal, _) actual ->
+                      (fun formal actual ->
                         Env.add new_env formal (eval env actual))
                       formals actuals;
                     let new_record =
@@ -1011,7 +1001,7 @@ let schedule_client (state : state) (program : program) (func_name : string)
           let op = Env.find program.client_ops func_name in
           let env = Env.create 91 in
           List.iter2
-            (fun (formal, _) actual -> Env.add env formal actual)
+            (fun formal actual -> Env.add env formal actual)
             op.formals actuals;
           let invocation =
             {
@@ -1068,7 +1058,7 @@ let schedule_sys_thread (state : state) (program : program) (func_name : string)
           let op = Env.find program.client_ops func_name in
           let env = Env.create 91 in
           List.iter2
-            (fun (formal, _) actual -> Env.add env formal actual)
+            (fun formal actual -> Env.add env formal actual)
             op.formals actuals;
           let invocation =
             {

@@ -320,7 +320,7 @@ and generate_cfg_from_match_stmt (match_exp : rhs) (cases : case_stmt list)
       (case_vert, body_vert)
 
 let rec scan_ast_for_local_vars (stmts : statement list) :
-    (string * typ * expr) list =
+    (string * expr) list =
   match stmts with
   | [] -> []
   | stmt :: rest -> (
@@ -328,7 +328,7 @@ let rec scan_ast_for_local_vars (stmts : statement list) :
       match stmt with
       | CondList cond_stmts ->
           let rec scan_cond_ast_for_local_vars (cond_stmts : cond_stmt list) :
-              (string * typ * expr) list =
+              (string * expr) list =
             match cond_stmts with
             | [] -> []
             | IfElseIf (_, body) :: remaining_ifelses ->
@@ -348,13 +348,13 @@ let rec scan_ast_for_local_vars (stmts : statement list) :
                 EInt 0
             | _ -> convert_rhs rhs
           in
-          (var_name, TString, init_value) :: rest_of_local_vars
+          (var_name, init_value) :: rest_of_local_vars
       | ForLoop (init, _, _, body) ->
           let init_var =
             match init with
             | Assignment (lhs, rhs) -> (
                 match lhs with
-                | VarLHS var_name -> [ (var_name, TString, convert_rhs rhs) ]
+                | VarLHS var_name -> [ (var_name, convert_rhs rhs) ]
                 | _ -> failwith "For loop init must be a variable assignment")
           and body_vars = scan_ast_for_local_vars body in
           init_var @ body_vars @ rest_of_local_vars
@@ -362,14 +362,14 @@ let rec scan_ast_for_local_vars (stmts : statement list) :
           let init_vars =
             match lhs with
             | TupleLHS vars ->
-                List.map (fun var -> (var, TString, EInt 214)) vars
-            | VarLHS var -> [ (var, TString, EInt 214) ]
+                List.map (fun var -> (var, EInt 214)) vars
+            | VarLHS var -> [ (var, EInt 214) ]
             | _ -> failwith "For loop in must be a variable assignment"
           and body_vars = scan_ast_for_local_vars body in
           init_vars @ body_vars @ rest_of_local_vars
       | Match (_, case_stmts) ->
           let rec scan_case_stmts_for_local_vars (case_stmts : case_stmt list) :
-              (string * typ * expr) list =
+              (string * expr) list =
             match case_stmts with
             | [] -> []
             | DefaultStmt stmts :: _ -> scan_ast_for_local_vars stmts
@@ -395,7 +395,7 @@ let process_func_def (func_def : func_def) (cfg : CFG.t) : function_info =
                 match param with
                 | Param rhs -> (
                     match rhs with
-                    | VarRHS formal -> (formal, TString)
+                    | VarRHS formal -> formal
                     | _ -> failwith "what param is this?"))
               params
           and locals = scan_ast_for_local_vars body in
