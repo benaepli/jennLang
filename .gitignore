@@ -4,3 +4,4 @@ output*.csv
 output_dump/*
 .venv
 .vscode
+output*.json

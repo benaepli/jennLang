@@ -12,120 +12,133 @@ let get_variant json =
 
 (* Recursively parses a JSON object into an `expr` *)
 let rec expr_of_yojson json : expr =
-  let key, value = get_variant json in
-  match key with
-  | "EVar" -> EVar (to_string value)
-  | "EFind" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EFind (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EFind expects 2 args")
-  | "EInt" -> EInt (to_int value)
-  | "EBool" -> EBool (to_bool value)
-  | "ENot" -> ENot (expr_of_yojson value)
-  | "EAnd" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EAnd (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EAnd expects 2 args")
-  | "EOr" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EOr (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EOr expects 2 args")
-  | "EEqualsEquals" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EEqualsEquals (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EEqualsEquals expects 2 args")
-  | "EMap" ->
-      EMap
-        (List.map
-           (fun pair ->
-             match to_list pair with
-             | [ k; v ] -> (expr_of_yojson k, expr_of_yojson v)
-             | _ -> failwith "EMap pair expects 2 items")
-           (to_list value))
-  | "EList" -> EList (List.map expr_of_yojson (to_list value))
-  | "EListPrepend" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EListPrepend (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EListPrepend expects 2 args")
-  | "EListAppend" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EListAppend (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EListAppend expects 2 args")
-  | "EListSubsequence" -> (
-      match to_list value with
-      | [ e1; e2; e3 ] ->
-          EListSubsequence
-            (expr_of_yojson e1, expr_of_yojson e2, expr_of_yojson e3)
-      | _ -> failwith "EListSubsequence expects 3 args")
-  | "EString" -> EString (to_string value)
-  | "ELessThan" -> (
-      match to_list value with
-      | [ e1; e2 ] -> ELessThan (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "ELessThan expects 2 args")
-  | "ELessThanEquals" -> (
-      match to_list value with
-      | [ e1; e2 ] -> ELessThanEquals (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "ELessThanEquals expects 2 args")
-  | "EGreaterThan" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EGreaterThan (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EGreaterThan expects 2 args")
-  | "EGreaterThanEquals" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EGreaterThanEquals (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EGreaterThanEquals expects 2 args")
-  | "EKeyExists" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EKeyExists (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EKeyExists expects 2 args")
-  | "EListLen" -> EListLen (expr_of_yojson value)
-  | "EListAccess" -> (
-      match to_list value with
-      | [ e; i ] -> EListAccess (expr_of_yojson e, to_int i)
-      | _ -> failwith "EListAccess expects 2 args")
-  | "EPlus" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EPlus (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EPlus expects 2 args")
-  | "EMinus" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EMinus (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EMinus expects 2 args")
-  | "ETimes" -> (
-      match to_list value with
-      | [ e1; e2 ] -> ETimes (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "ETimes expects 2 args")
-  | "EDiv" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EDiv (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EDiv expects 2 args")
-  | "EMod" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EMod (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EMod expects 2 args")
-  | "EPollForResps" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EPollForResps (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EPollForResps expects 2 args")
-  | "EPollForAnyResp" -> EPollForAnyResp (expr_of_yojson value)
-  | "ENextResp" -> ENextResp (expr_of_yojson value)
-  | "EMin" -> (
-      match to_list value with
-      | [ e1; e2 ] -> EMin (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "EMin expects 2 args")
-  | "ETuple" -> ETuple (List.map expr_of_yojson (to_list value))
-  | "ETupleAccess" -> (
-      match to_list value with
-      | [ e; i ] -> ETupleAccess (expr_of_yojson e, to_int i)
-      | _ -> failwith "ETupleAccess expects 2 args")
-  | "EUnit" -> EUnit
-  | "ENil" -> ENil
-  | "EUnwrap" -> EUnwrap (expr_of_yojson value)
-  | "ECoalesce" -> (
-      match to_list value with
-      | [ e1; e2 ] -> ECoalesce (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "ECoalesce expects 2 args")
-  | _ -> failwith ("Unknown expr key: " ^ key)
+  match json with
+  (* Handle Serde's default for unit variants *)
+  | `String "EUnit" -> EUnit
+  | `String "ENil" -> ENil
+  (* Handle adjacently tagged variants*)
+  | `Assoc [ (key, value) ] -> (
+      match key with
+      | "EVar" -> EVar (to_string value)
+      | "EFind" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EFind (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EFind expects 2 args")
+      | "EInt" -> EInt (to_int value)
+      | "EBool" -> EBool (to_bool value)
+      | "ENot" -> ENot (expr_of_yojson value)
+      | "EAnd" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EAnd (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EAnd expects 2 args")
+      | "EOr" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EOr (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EOr expects 2 args")
+      | "EEqualsEquals" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EEqualsEquals (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EEqualsEquals expects 2 args")
+      | "EMap" ->
+          EMap
+            (List.map
+               (fun pair ->
+                 match to_list pair with
+                 | [ k; v ] -> (expr_of_yojson k, expr_of_yojson v)
+                 | _ -> failwith "EMap pair expects 2 items")
+               (to_list value))
+      | "EList" -> EList (List.map expr_of_yojson (to_list value))
+      | "EListPrepend" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EListPrepend (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EListPrepend expects 2 args")
+      | "EListAppend" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EListAppend (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EListAppend expects 2 args")
+      | "EListSubsequence" -> (
+          match to_list value with
+          | [ e1; e2; e3 ] ->
+              EListSubsequence
+                (expr_of_yojson e1, expr_of_yojson e2, expr_of_yojson e3)
+          | _ -> failwith "EListSubsequence expects 3 args")
+      | "EString" -> EString (to_string value)
+      | "ELessThan" -> (
+          match to_list value with
+          | [ e1; e2 ] -> ELessThan (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "ELessThan expects 2 args")
+      | "ELessThanEquals" -> (
+          match to_list value with
+          | [ e1; e2 ] -> ELessThanEquals (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "ELessThanEquals expects 2 args")
+      | "EGreaterThan" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EGreaterThan (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EGreaterThan expects 2 args")
+      | "EGreaterThanEquals" -> (
+          match to_list value with
+          | [ e1; e2 ] ->
+              EGreaterThanEquals (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EGreaterThanEquals expects 2 args")
+      | "EKeyExists" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EKeyExists (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EKeyExists expects 2 args")
+      | "EListLen" -> EListLen (expr_of_yojson value)
+      | "EListAccess" -> (
+          match to_list value with
+          | [ e; i ] -> EListAccess (expr_of_yojson e, to_int i)
+          | _ -> failwith "EListAccess expects 2 args")
+      | "EPlus" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EPlus (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EPlus expects 2 args")
+      | "EMinus" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EMinus (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EMinus expects 2 args")
+      | "ETimes" -> (
+          match to_list value with
+          | [ e1; e2 ] -> ETimes (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "ETimes expects 2 args")
+      | "EDiv" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EDiv (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EDiv expects 2 args")
+      | "EMod" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EMod (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EMod expects 2 args")
+      | "EPollForResps" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EPollForResps (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EPollForResps expects 2 args")
+      | "EPollForAnyResp" -> EPollForAnyResp (expr_of_yojson value)
+      | "ENextResp" -> ENextResp (expr_of_yojson value)
+      | "EMin" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EMin (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EMin expects 2 args")
+      | "ETuple" -> ETuple (List.map expr_of_yojson (to_list value))
+      | "ETupleAccess" -> (
+          match to_list value with
+          | [ e; i ] -> ETupleAccess (expr_of_yojson e, to_int i)
+          | _ -> failwith "ETupleAccess expects 2 args")
+      (* These two are now technically redundant, but harmless to keep.
+       They would handle {"EUnit": null} if you ever generated that. *)
+      | "EUnit" -> EUnit
+      | "ENil" -> ENil
+      | "EUnwrap" -> EUnwrap (expr_of_yojson value)
+      | "ECoalesce" -> (
+          match to_list value with
+          | [ e1; e2 ] -> ECoalesce (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "ECoalesce expects 2 args")
+      | _ -> failwith ("Unknown expr key: " ^ key))
+  (* Handle malformed JSON *)
+  | _ ->
+      failwith
+        ("Expected (string) or (object with one key) for expr. Got: "
+       ^ Yojson.Safe.to_string json)
 
 let lhs_of_yojson json : lhs =
   let key, value = get_variant json in
