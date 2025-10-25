@@ -7,16 +7,19 @@ module DA = BatDynArray
        y = f(g(x))
      gets translated to the IR
        tmp = g(x)
-       y = f(tmp)
+      
+ y = f(tmp)
    - An RPC to a func that nominally returns (say) a string cannot evaluate to
      an string -- otherwise, the only way to execute the program is to preempt
      the current activation record and wait until the RPC returns to resume.  In
      particular, this makes it very difficult to implement fault-tolerant
      protocols -- if node A calls an RPC on node B and node B fails, then node
-     A's activation record is blocked forever.  The proposed alternative is that
+     A's activation record is blocked 
+forever.  The proposed alternative is that
      an RPC that nomially returns a string evaluates to Future<string>.  We can
      manipulate a valute of type Future<string> by
-   - checking whether its value is available (e.g. fut.isAvailable() -> bool)
+   - checking whether its value is available (e.g.
+fut.isAvailable() -> bool)
        (nonpreemptible)
    - retrieving its value (e.g. fut.isValue() -> string) (preemptible)
    - In general, I do not understand how "Roles" should be implemented
@@ -69,14 +72,90 @@ type instr =
   | Async of lhs * expr * string * expr list (* jenndbg RPC*)
   | Copy of lhs * expr
     (* | Write of string * string (*jenndbg write a value *) *)
-  | StoreTupleAccess of expr * int * expr
 [@@deriving ord]
 
-(* Run-time values *)
-type value =
+(*
+ * We use mutually recursive modules and types to define 'value'
+ * and the 'ValueMap' hash table module, which requires 'value'
+ * for its key implementation.
+ *)
+module rec Value : sig
+  type t =
+    | VInt of int
+    | VBool of bool
+    | VMap of t ValueMap.t
+    | VList of t list ref
+    | VOption of t option
+    | VFuture of t option ref
+    | VNode of int
+    | VString of string
+    | VUnit
+    | VTuple of t array
+end = struct
+  type t =
+    | VInt of int
+    | VBool of bool
+    | VMap of t ValueMap.t
+    | VList of t list ref
+    | VOption of t option
+    | VFuture of t option ref
+    | VNode of int
+    | VString of string
+    | VUnit
+    | VTuple of t array
+end
+
+and ValueKey : sig
+  type t = Value.t
+
+  val equal : t -> t -> bool
+  val hash : t -> int
+end = struct
+  open Value
+
+  type t = Value.t
+
+  let rec equal v1 v2 =
+    match (v1, v2) with
+    | VInt i1, VInt i2 -> i1 = i2
+    | VBool b1, VBool b2 -> b1 = b2
+    | VString s1, VString s2 -> s1 = s2
+    | VNode n1, VNode n2 -> n1 = n2
+    | VUnit, VUnit -> true
+    | VOption o1, VOption o2 -> (
+        match (o1, o2) with
+        | None, None -> true
+        | Some v1', Some v2' ->
+            equal v1' v2' (* Options are immutable, so this is fine *)
+        | _ -> false)
+    | VTuple a1, VTuple a2 -> (
+        try Array.for_all2 equal a1 a2 with Invalid_argument _ -> false)
+    | VList l1, VList l2 -> l1 == l2
+    | VFuture f1, VFuture f2 -> f1 == f2
+    | VMap m1, VMap m2 -> m1 == m2
+    | _ -> false
+
+  let rec hash v =
+    match v with
+    | VInt i -> Hashtbl.hash i
+    | VBool b -> Hashtbl.hash b
+    | VString s -> Hashtbl.hash s
+    | VNode n -> Hashtbl.hash n
+    | VUnit -> 0
+    | VOption o -> ( match o with None -> 1 | Some v' -> 17 * hash v')
+    | VTuple a -> Array.fold_left (fun acc x -> (23 * acc) + hash x) 5 a
+    | VList l -> Hashtbl.hash l
+    | VFuture f -> Hashtbl.hash f
+    | VMap m -> Hashtbl.hash m
+end
+
+and ValueMap : (Hashtbl.S with type key = Value.t) = Hashtbl.Make (ValueKey)
+
+(* Type alias for convenience - expose constructors *)
+type value = Value.t =
   | VInt of int
   | VBool of bool
-  | VMap of (value, value) Hashtbl.t
+  | VMap of value ValueMap.t
   | VList of value list ref
   | VOption of value option
   | VFuture of value option ref
@@ -88,7 +167,7 @@ type value =
 (* Run-time value of a left-hand-side *)
 type lvalue =
   | LVVar of string
-  | LVAccess of (value * (value, value) Hashtbl.t)
+  | LVAccess of (value * value ValueMap.t)
   | LVAccessList of (value * value list ref)
   | LVTuple of string list
 
@@ -194,10 +273,7 @@ let to_string (l : 'a label) : string =
       | Assign (lhs, expr) ->
           "Instr(Assign(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr
           ^ "))"
-      | Copy (_, _) -> "instr copy"
-      | StoreTupleAccess (e_tuple, idx, e_val) ->
-          "Instr(StoreTupleAccess(" ^ to_string_expr e_tuple ^ ", "
-          ^ string_of_int idx ^ ", " ^ to_string_expr e_val ^ "))")
+      | Copy (_, _) -> "instr copy")
   | Pause _ -> "Pause"
   | Await (lhs, expr, _) ->
       "Await(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr ^ ")"
@@ -217,7 +293,7 @@ let rec to_string_value (v : value) : string =
           (List.map
              (fun (k, v) ->
                "\t" ^ to_string_value k ^ ": " ^ to_string_value v ^ "\n")
-             (Hashtbl.fold (fun k v acc -> (k, v) :: acc) m []))
+             (ValueMap.fold (fun k v acc -> (k, v) :: acc) m []))
       ^ ")"
   | VList l -> "VList(" ^ String.concat ", " (List.map to_string_value !l) ^ ")"
   | VOption o ->
@@ -237,8 +313,8 @@ let rec to_string_value (v : value) : string =
       ^ ")"
 
 module CFG : sig
-  type t (* jenndbg: control flow graph type *)
-  type vertex (* jenndbg: vertex of the control flow graph *)
+  type vertex = int (* jenndbg: vertex of the control flow graph *)
+  type t = vertex label DA.t (* jenndbg: control flow graph type *)
 
   val empty : unit -> t (* jenndbg: create an empty control flow graph *)
 
@@ -285,11 +361,12 @@ type record = {
   continuation : value -> unit;
       (* Called when activation record returns
                                     For RPCs, this writes to the associate future;
-                                    For client operations it appends to the history *)
+                                    For client operations it appends to the history 
+*)
   env : value Env.t;
   id : int;
   mutable x : float;
-      (* threshold for being chosen to be executed, when scheduler is implementing a delay. *)
+  (* threshold for being chosen to be executed, when scheduler is implementing a delay. *)
   f : float -> float (* updates x every time this record is not chosen *);
 }
 
@@ -326,7 +403,8 @@ type function_info = {
 
 (* Representation of program syntax *)
 type program = {
-  cfg : CFG.t; (* jenndbg this is its control flow *)
+  cfg : CFG.t;
+  (* jenndbg this is its control flow *)
   rpc : function_info Env.t;
   client_ops : function_info Env.t;
 }
@@ -348,7 +426,7 @@ let rec eval (env : record_env) (expr : expr) : value =
   | EVar v -> load v env
   | EFind (c, k) -> (
       match eval env c with
-      | VMap map -> Hashtbl.find map (eval env k)
+      | VMap map -> ValueMap.find map (eval env k)
       | VList l -> (
           match !l with
           | [] -> failwith "Cannot index into empty list"
@@ -357,12 +435,13 @@ let rec eval (env : record_env) (expr : expr) : value =
               | VInt i | VNode i ->
                   if i < 0 || i >= List.length !l then (
                     Printf.printf "idx %d, len %d\n" i (List.length !l);
+
                     failwith "idx out of range of VList")
                   else List.nth !l i
               | _ -> failwith "Cannot index into a list with non-integer"))
       | VString s -> (
           match load s env with
-          | VMap map -> Hashtbl.find map (eval env k)
+          | VMap map -> ValueMap.find map (eval env k)
           | _ ->
               failwith
                 "EFind eval fail: cannot index into anything else but map with \
@@ -458,13 +537,12 @@ let rec eval (env : record_env) (expr : expr) : value =
       | _, VOption _ -> VBool false
       | VTuple _, _ -> VBool false)
   | EMap kvp ->
-      let rec makemap (kvpairs : (expr * expr) list) : (value, value) Hashtbl.t
-          =
+      let rec makemap (kvpairs : (expr * expr) list) : value ValueMap.t =
         match kvpairs with
-        | [] -> Hashtbl.create 91
+        | [] -> ValueMap.create 91
         | (k, v) :: rest ->
             let tbl = makemap rest in
-            Hashtbl.add tbl (eval env k) (eval env v);
+            ValueMap.add tbl (eval env k) (eval env v);
             tbl
       in
       VMap (makemap kvp)
@@ -526,7 +604,7 @@ let rec eval (env : record_env) (expr : expr) : value =
       | _ -> failwith "EGreaterThanEquals eval fail")
   | EKeyExists (key, mp) -> (
       match (eval env key, eval env mp) with
-      | k, VMap m -> VBool (Hashtbl.mem m k)
+      | k, VMap m -> VBool (ValueMap.mem m k)
       | _ ->
           Printf.printf "%s is not a map, key %s may not exist\n"
             (to_string_expr mp) (to_string_expr key);
@@ -534,7 +612,7 @@ let rec eval (env : record_env) (expr : expr) : value =
   | EListLen e -> (
       match eval env e with
       | VList l -> VInt (List.length !l)
-      | VMap m -> VInt (Hashtbl.length m)
+      | VMap m -> VInt (ValueMap.length m)
       | _ -> failwith "EListLen eval fail on non-collection")
   | EListAccess (ls, idx) -> (
       match eval env ls with
@@ -607,7 +685,7 @@ let rec eval (env : record_env) (expr : expr) : value =
               in
               VInt (poll_for_response !list_ref))
       | VMap m ->
-          let lst = Hashtbl.fold (fun _ v acc -> v :: acc) m [] in
+          let lst = ValueMap.fold (fun _ v acc -> v :: acc) m [] in
           let rec poll_for_response (lst : value list) : int =
             match lst with
             | [] -> 0
@@ -615,7 +693,8 @@ let rec eval (env : record_env) (expr : expr) : value =
                 match hd with
                 | VFuture fut -> (
                     match !fut with
-                    (* | Some v -> if (v = eval env e2) then 1 + poll_for_response tl else poll_for_response tl *)
+                    (* | Some v -> if (v = eval env e2) then 1 + poll_for_response tl 
+else poll_for_response tl *)
                     | Some _ -> 1 + poll_for_response tl
                     | None -> poll_for_response tl)
                 | VBool b -> (
@@ -653,7 +732,7 @@ let rec eval (env : record_env) (expr : expr) : value =
               in
               VBool (poll_for_response !list_ref))
       | VMap m ->
-          let folded_map = Hashtbl.fold (fun _ v acc -> v :: acc) m [] in
+          let folded_map = ValueMap.fold (fun _ v acc -> v :: acc) m [] in
           let rec poll_for_response (lst : value list) : bool =
             match lst with
             | [] -> false
@@ -674,17 +753,17 @@ let rec eval (env : record_env) (expr : expr) : value =
   | ENextResp e -> (
       match eval env e with
       | VMap m ->
-          let folded_map = Hashtbl.fold (fun k v acc -> (k, v) :: acc) m [] in
+          let folded_map = ValueMap.fold (fun k v acc -> (k, v) :: acc) m [] in
           let rec nxt_resp (lst : (value * value) list) : value =
             match lst with
-            | [] -> failwith "No responses in map"
+            | [] -> failwith "No responses \nin map"
             | hd :: tl -> (
                 let key, value = hd in
                 match value with
                 | VFuture fut -> (
                     match !fut with
                     | Some v ->
-                        Hashtbl.replace m key (VFuture (ref None));
+                        ValueMap.replace m key (VFuture (ref None));
                         v
                     | None -> nxt_resp tl)
                 | _ -> failwith "ENextResp on non-future")
@@ -735,7 +814,7 @@ let store (lhs : lhs) (vl : value) (env : record_env) : unit =
   | LVVar var ->
       if Env.mem env.local_env var then Env.replace env.local_env var vl
       else Env.replace env.node_env var vl
-  | LVAccess (key, table) -> Hashtbl.replace table key vl
+  | LVAccess (key, table) -> ValueMap.replace table key vl
   | LVAccessList (idx, ref_l) -> (
       match idx with
       | VInt i | VNode i ->
@@ -757,7 +836,7 @@ let copy (lhs : lhs) (vl : value) (env : record_env) : unit =
   | LVVar var -> (
       match vl with
       | VMap m ->
-          let temp = Hashtbl.copy m in
+          let temp = ValueMap.copy m in
           Env.replace env.local_env var (VMap temp)
       | VList l ->
           let temp = ref (List.map (fun x -> x) !l) in
@@ -780,22 +859,11 @@ let exec (state : state) (program : program) (record : record) =
     | Instr (instruction, next) ->
         record.pc <- next;
         (match instruction with
-        | StoreTupleAccess (e_tuple, idx, e_val) ->
-            let v_val = eval env e_val in
-            (match eval env e_tuple with
-            | VTuple arr -> (
-                try arr.(idx) <- v_val
-                with Invalid_argument _ ->
-                  failwith
-                    ("Runtime error: Tuple index " ^ string_of_int idx
-                   ^ " out of bounds for assignment"))
-            | _ ->
-                failwith "Type error: Attempted tuple assignment on non-tuple");
-            loop ()
         | Async (lhs, node, func, actuals) -> (
             match eval env node with
             | VNode node_id | VInt node_id ->
                 let new_future = ref None in
+
                 let { entry; formals; locals; _ } =
                   function_info func program
                 in
@@ -808,11 +876,11 @@ let exec (state : state) (program : program) (record : record) =
                  with Invalid_argument _ ->
                    Printf.printf
                      "Func %s mismatches def and caller args\n\
-                     \                    formals: %s\n\
-                     \                    actuals: %s\n"
+                     \                    formals: %s\n\n\
+                     \                               actuals: %s\n"
                      func
                      (String.concat ", " formals)
-                     (String.concat ", " (List.map to_string_expr actuals));
+                     (String.concat ", \n" (List.map to_string_expr actuals));
                    failwith "Mismatched arguments in function call");
                 List.iter
                   (fun (var_name, expr) ->
@@ -843,6 +911,7 @@ let exec (state : state) (program : program) (record : record) =
                 | VNode node_id ->
                     let new_future = ref None in
                     let { entry; formals; _ } = function_info func program in
+
                     let new_env = Env.create 91 in
                     List.iter2
                       (fun formal actual ->
@@ -859,6 +928,7 @@ let exec (state : state) (program : program) (record : record) =
                         f = record.f;
                       }
                     in
+
                     store lhs (VFuture new_future) env;
                     state.records <- new_record :: state.records
                 | _ -> failwith "Type error idk what you are anymore"))
@@ -890,7 +960,8 @@ let exec (state : state) (program : program) (record : record) =
             | None ->
                 (* Still waiting.  TODO: should keep blocked records in a
                  different data structure to avoid scheduling records that
-                 can't do any work. *)
+                 can't 
+do any work. *)
                 state.records <- record :: state.records)
         | VBool b ->
             if b then (
@@ -903,7 +974,7 @@ let exec (state : state) (program : program) (record : record) =
         | VOption _ -> failwith "Type error option"
         | VString _ -> failwith "Type error string"
         | VNode _ -> failwith "Type error node"
-        | VUnit -> failwith "Type error unit"
+        | VUnit -> failwith "Type \nerror unit"
         | VTuple _ -> failwith "Type error tuple")
     | Return expr -> record.continuation (eval env expr)
     | Pause next ->
@@ -914,14 +985,15 @@ let exec (state : state) (program : program) (record : record) =
         | VMap map -> (
             if
               (* First remove the pair being processed from the map. *)
-              Hashtbl.length map == 0
+              ValueMap.length map == 0
             then (
               record.pc <- next;
               loop ())
             else
               let single_pair =
                 let result_ref = ref None in
-                Hashtbl.iter
+
+                ValueMap.iter
                   (fun key value ->
                     match !result_ref with
                     | Some _ -> () (* We already found a pair, so do nothing *)
@@ -929,8 +1001,9 @@ let exec (state : state) (program : program) (record : record) =
                   map;
                 !result_ref
               in
-              Hashtbl.remove map (fst (Option.get single_pair));
+              ValueMap.remove map (fst (Option.get single_pair));
               store (LVar "local_copy") (VMap map) env;
+
               match lhs with
               | LTuple [ key; value ] ->
                   let k, v = Option.get single_pair in
@@ -960,6 +1033,7 @@ let exec (state : state) (program : program) (record : record) =
                     | Some _ -> () (* We already found an item, so do nothing *)
                     | None -> result_ref := Some item)
                   !list_ref;
+
                 !result_ref
               in
               list_ref :=
@@ -1029,6 +1103,7 @@ let schedule_record (state : state) (program : program)
                   let src_node = r.node in
                   let dest_node = node_id in
                   let should_execute = ref true in
+
                   if
                     randomly_drop_msgs
                     &&
@@ -1078,7 +1153,8 @@ let schedule_record (state : state) (program : program)
   in
   pick chosen_idx [] state.records
 
-(* Choose a client without a pending operation, create a new activation record
+(* Choose a client without a 
+pending operation, create a new activation record
    to execute it, and append the invocation to the history *)
 let schedule_client (state : state) (program : program) (func_name : string)
     (actuals : value list) (unique_id : int) : unit =
@@ -1092,6 +1168,7 @@ let schedule_client (state : state) (program : program) (func_name : string)
           List.iter2
             (fun formal actual -> Env.add env formal actual)
             op.formals actuals;
+
           let invocation =
             {
               client_id = c;
@@ -1149,6 +1226,7 @@ let schedule_sys_thread (state : state) (program : program) (func_name : string)
           List.iter2
             (fun formal actual -> Env.add env formal actual)
             op.formals actuals;
+
           let invocation =
             {
               client_id = c;

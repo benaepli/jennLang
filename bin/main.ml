@@ -34,11 +34,11 @@ let head_idx = 0
 let tail_idx = chain_len - 1
 let topology = "FULL"
 
-let data () : (value, value) Hashtbl.t =
-  let tbl = Hashtbl.create 91 in
-  Hashtbl.add tbl (VString "birthday") (VInt 214);
-  Hashtbl.add tbl (VString "epoch") (VInt 1980);
-  Hashtbl.add tbl (VString "name") (VString "Jennifer");
+let data () : value ValueMap.t =
+  let tbl = ValueMap.create 91 in
+  ValueMap.add tbl (VString "birthday") (VInt 214);
+  ValueMap.add tbl (VString "epoch") (VInt 1980);
+  ValueMap.add tbl (VString "name") (VString "Jennifer");
   tbl
 
 let mod_op (i : int) (m : int) : int = if i < 0 then i + m else i mod m
