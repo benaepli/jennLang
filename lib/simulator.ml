@@ -854,6 +854,7 @@ let function_info name program =
    state.records *)
 let exec (state : state) (program : program) (record : record) =
   let env = { local_env = record.env; node_env = state.nodes.(record.node) } in
+  Env.add env.local_env "self" (VNode record.node);
   let rec loop () =
     match CFG.label program.cfg record.pc with
     | Instr (instruction, next) ->

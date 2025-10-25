@@ -152,25 +152,19 @@ let init_topology (topology : string) (global_state : state) (prog : program) :
   | "RING" -> raise (Failure "Not implemented RING topology")
   | "FULL" ->
       for i = 0 to num_servers - 1 do
-        schedule_client global_state prog "init"
-          [
-            VNode i;
-            VList
-              (ref
-                 (List.init num_servers (fun j -> VNode j)
-                 |> List.filter (fun node ->
-                        match node with VNode n -> n <> i | _ -> true)));
-          ]
+        schedule_client global_state prog "23_init"
+          [ VNode i; VList (ref (List.init num_servers (fun j -> VNode j))) ]
           0;
         sync_exec global_state prog false false false [] false
       done
   | _ -> raise (Failure "Invalid topology")
 
+(* Corrected *)
 let schedule_vr_executions (global_state : state) (prog : program) : unit =
   let scheduler = schedule_client global_state prog in
-  scheduler "newEntry" [ VInt 1; VString "Hello world" ] 0;
-  scheduler "newEntry" [ VNode 0; VString "WON_ELECTION" ] 0;
-  scheduler "newEntry" [ VNode 0; VString "WRITE KEY" ] 0
+  scheduler "24_newEntry" [ VNode 1; VInt 101 ] 0;
+  scheduler "24_newEntry" [ VNode 0; VInt 201 ] 0;
+  scheduler "24_newEntry" [ VNode 0; VInt 301 ] 0
 
 let init_clients (global_state : state) (prog : program) : unit =
   for i = 0 to num_clients - 1 do
@@ -192,6 +186,40 @@ let init_clients (global_state : state) (prog : program) : unit =
     sync_exec global_state prog false false false [] false
   done
 
+let init_nodes (global_state : state) (prog : program) : unit =
+  (* Find the role init function by its suffix, which the compiler guarantees *)
+  let init_fn_name =
+    Env.fold
+      (fun name _ acc ->
+        if BatString.ends_with name "BASE_NODE_INIT" then Some name else acc)
+      prog.rpc None
+  in
+  match init_fn_name with
+  | None -> failwith "Could not find Role BASE_NODE_INIT function in prog.rpc"
+  | Some name ->
+      Printf.printf "Found Node init function: %s\n" name;
+      let init_fn = Env.find prog.rpc name in
+      for i = 0 to num_servers - 1 do
+        let node_id = i in
+        let env = Env.create 91 in
+        let record =
+          {
+            pc = init_fn.entry;
+            node = node_id;
+            continuation = (fun _ -> ());
+            (* Fire and forget *)
+            env;
+            id = -1;
+            (* System init *)
+            x = 0.0;
+            f = (fun x -> x);
+          }
+        in
+        (* Add the record and run it to initialize the node's state *)
+        global_state.records <- record :: global_state.records;
+        sync_exec global_state prog false false false [] false
+      done
+
 let interp (compiled_json : string) (intermediate_output : string)
     (scheduler_config_json : string) : unit =
   let config = read_config_file scheduler_config_json in
@@ -205,6 +233,7 @@ let interp (compiled_json : string) (intermediate_output : string)
   let prog = load_program_from_file compiled_json in
 
   init_clients global_state prog;
+  init_nodes global_state prog;
   init_topology topology global_state prog;
   schedule_vr_executions global_state prog;
 
