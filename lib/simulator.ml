@@ -539,7 +539,7 @@ let rec eval (env : record_env) (expr : expr) : value =
   | EMap kvp ->
       let rec makemap (kvpairs : (expr * expr) list) : value ValueMap.t =
         match kvpairs with
-        | [] -> ValueMap.create 91
+        | [] -> ValueMap.create 1024
         | (k, v) :: rest ->
             let tbl = makemap rest in
             ValueMap.add tbl (eval env k) (eval env v);
@@ -868,7 +868,7 @@ let exec (state : state) (program : program) (record : record) =
                 let { entry; formals; locals; _ } =
                   function_info func program
                 in
-                let new_env = Env.create 91 in
+                let new_env = Env.create 1024 in
                 (try
                    List.iter2
                      (fun formal actual ->
@@ -913,7 +913,7 @@ let exec (state : state) (program : program) (record : record) =
                     let new_future = ref None in
                     let { entry; formals; _ } = function_info func program in
 
-                    let new_env = Env.create 91 in
+                    let new_env = Env.create 1024 in
                     List.iter2
                       (fun formal actual ->
                         Env.add new_env formal (eval env actual))
@@ -1165,7 +1165,7 @@ let schedule_client (state : state) (program : program) (func_name : string)
     | c :: cs ->
         if n == 0 then (
           let op = Env.find program.client_ops func_name in
-          let env = Env.create 91 in
+          let env = Env.create 1024 in
           List.iter2
             (fun formal actual -> Env.add env formal actual)
             op.formals actuals;
@@ -1223,7 +1223,7 @@ let schedule_sys_thread (state : state) (program : program) (func_name : string)
     | c :: cs ->
         if n == 0 then (
           let op = Env.find program.client_ops func_name in
-          let env = Env.create 91 in
+          let env = Env.create 1024 in
           List.iter2
             (fun formal actual -> Env.add env formal actual)
             op.formals actuals;

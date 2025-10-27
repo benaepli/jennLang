@@ -1,18 +1,38 @@
 open Simulator
 
-(* Helper to convert a value to its string representation for the CSV *)
-let string_of_value_for_csv (v : value) : string =
+(* Helper to convert a value to its Yojson representation *)
+let rec json_of_value (v : value) : Yojson.Basic.t =
   match v with
-  | VInt i -> string_of_int i
-  | VBool b -> string_of_bool b
-  | VString s -> s (* The Csv library will handle any necessary quoting *)
-  | VNode n -> string_of_int n
-  | VFuture _ -> "TODO implement VFuture"
-  | VMap _ -> "TODO implement VMap"
-  | VOption _ -> "TODO implement VOptions"
-  | VList _ -> "TODO implement VList"
-  | VUnit -> "TODO implement VUnit"
-  | VTuple _ -> "TODO implement VTuple"
+  | VInt i -> `Assoc [ ("type", `String "VInt"); ("value", `Int i) ]
+  | VBool b -> `Assoc [ ("type", `String "VBool"); ("value", `Bool b) ]
+  | VString s -> `Assoc [ ("type", `String "VString"); ("value", `String s) ]
+  | VNode n -> `Assoc [ ("type", `String "VNode"); ("value", `Int n) ]
+  | VFuture f ->
+      let value_json =
+        match !f with Some v -> json_of_value v | None -> `Null
+      in
+      `Assoc [ ("type", `String "VFuture"); ("value", value_json) ]
+  | VMap m ->
+      let pairs = ValueMap.fold (fun k v acc -> (k, v) :: acc) m [] in
+      (* Represent map as an array of [key, value] pairs *)
+      let json_pairs =
+        List.map
+          (fun (k, v) -> `List [ json_of_value k; json_of_value v ])
+          pairs
+      in
+      `Assoc [ ("type", `String "VMap"); ("value", `List json_pairs) ]
+  | VOption o ->
+      let value_json =
+        match o with Some v -> json_of_value v | None -> `Null
+      in
+      `Assoc [ ("type", `String "VOption"); ("value", value_json) ]
+  | VList l ->
+      let items_json = List.map json_of_value !l in
+      `Assoc [ ("type", `String "VList"); ("value", `List items_json) ]
+  | VUnit -> `Assoc [ ("type", `String "VUnit"); ("value", `Null) ]
+  | VTuple t ->
+      let items_json = Array.to_list t |> List.map json_of_value in
+      `Assoc [ ("type", `String "VTuple"); ("value", `List items_json) ]
 
 (* Saves the simulation history to a CSV file *)
 let save_history_to_csv (history : operation DA.t) (filename : string) : unit =
@@ -27,8 +47,7 @@ let save_history_to_csv (history : operation DA.t) (filename : string) : unit =
   let payload_headers =
     List.init max_payload_len (fun i -> "Payload" ^ string_of_int (i + 1))
   in
-  let header = [ "ClientID"; "Kind"; "Action" ] @ payload_headers in
-
+  let header = [ "UniqueID"; "ClientID"; "Kind"; "Action" ] @ payload_headers in
   (* Map all history operations to a list of string lists (rows) *)
   let rows =
     DA.fold_left
@@ -40,10 +59,15 @@ let save_history_to_csv (history : operation DA.t) (filename : string) : unit =
           | Invocation -> "Invocation"
         in
         let action = op.op_action in
-        let base_row = [ client_id; kind; action ] in
+        let unique_id = string_of_int op.unique_id in
+        let base_row = [ unique_id; client_id; kind; action ] in
 
-        (* Convert payload to list of strings using the helper *)
-        let payload_strings = List.map string_of_value_for_csv op.payload in
+        (* Convert payload to list of JSON strings using the new helper *)
+        let payload_strings =
+          List.map
+            (fun v -> json_of_value v |> Yojson.Basic.to_string)
+            op.payload
+        in
 
         (* Pad the row with empty strings to match the header width *)
         let padding =

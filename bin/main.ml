@@ -35,7 +35,7 @@ let tail_idx = chain_len - 1
 let topology = "FULL"
 
 let data () : value ValueMap.t =
-  let tbl = ValueMap.create 91 in
+  let tbl = ValueMap.create 1024 in
   ValueMap.add tbl (VString "birthday") (VInt 214);
   ValueMap.add tbl (VString "epoch") (VInt 1980);
   ValueMap.add tbl (VString "name") (VString "Jennifer");
@@ -48,7 +48,7 @@ let global_state =
     nodes =
       Array.init
         (num_servers + num_clients + num_sys_threads)
-        (fun _ -> Env.create 91);
+        (fun _ -> Env.create 1024);
     records = [];
     history = DA.create ();
     free_clients = List.init num_clients (fun i -> num_servers + i);
@@ -103,8 +103,8 @@ let find_client_op_by_suffix (prog : program) (suffix : string) : string =
   | Some name -> name
   | None -> failwith ("Could not find a client operation with suffix: " ^ suffix)
 
-let init_topology (topology : string) (global_state : state) (prog : program) :
-    unit =
+let init_topology (topology : string) (global_state : state) (prog : program)
+    (operation_id_counter : int ref) : unit =
   match topology with
   | "LINEAR" ->
       for i = 0 to num_servers - 1 do
@@ -121,7 +121,8 @@ let init_topology (topology : string) (global_state : state) (prog : program) :
             VNode i;
             VMap (data ());
           ]
-          0;
+          (operation_id_counter := !operation_id_counter + 1;
+           !operation_id_counter);
         sync_exec global_state prog false false false [] false;
         (* Hashtbl.iter (fun _ _ -> print_endline "+1") data; *)
         print_endline "init mid"
@@ -139,7 +140,8 @@ let init_topology (topology : string) (global_state : state) (prog : program) :
           VNode head_idx;
           VMap (data ());
         ]
-        0;
+        (operation_id_counter := !operation_id_counter + 1;
+         !operation_id_counter);
       print_endline "init head";
       (* Hashtbl.iter (fun _ _ -> print_endline "+1") data; *)
       sync_exec global_state prog false false false [] false;
@@ -156,7 +158,8 @@ let init_topology (topology : string) (global_state : state) (prog : program) :
           VNode tail_idx;
           VMap (data ());
         ]
-        0;
+        (operation_id_counter := !operation_id_counter + 1;
+         !operation_id_counter);
       print_endline "init tail";
       (* Hashtbl.iter (fun _ _ -> print_endline "+1") data; *)
       sync_exec global_state prog false false false [] false
@@ -167,25 +170,102 @@ let init_topology (topology : string) (global_state : state) (prog : program) :
       for i = 0 to num_servers - 1 do
         schedule_client global_state prog init_fn_name
           [ VNode i; VList (ref (List.init num_servers (fun j -> VNode j))) ]
-          0;
+          (operation_id_counter := !operation_id_counter + 1;
+           !operation_id_counter);
         sync_exec global_state prog false false false [] false
       done
   | _ -> raise (Failure "Invalid topology")
 
-(* Corrected *)
-let schedule_vr_executions (global_state : state) (prog : program) : unit =
-  let scheduler prog_name =
-    schedule_client global_state prog (find_client_op_by_suffix prog prog_name)
+let _schedule_vr_executions (global_state : state) (prog : program)
+    (operation_id_counter : int ref) : unit =
+  let scheduler prog_name actuals =
+    schedule_client global_state prog
+      (find_client_op_by_suffix prog prog_name)
+      actuals
+      (operation_id_counter := !operation_id_counter + 1;
+       !operation_id_counter)
   in
-  scheduler "newEntry" [ VNode 1; VInt 101 ] 0;
-  scheduler "newEntry" [ VNode 0; VInt 201 ] 0;
-  scheduler "newEntry" [ VNode 0; VInt 301 ] 0
+  scheduler "newEntry" [ VNode 1; VInt 101 ];
+  scheduler "newEntry" [ VNode 0; VInt 201 ];
+  scheduler "getCommittedLog" [ VNode 0 ]
+
+let rec schedule_random_op (global_state : state) (prog : program)
+    (operation_id_counter : int ref) (client_id : int) : unit =
+  Random.self_init ();
+  let op_name_suffix =
+    if Random.bool () then "newEntry" else "getCommittedLog"
+  in
+  let op_name = find_client_op_by_suffix prog op_name_suffix in
+  let target_node = Random.int num_servers in
+  let actuals =
+    if op_name_suffix = "newEntry" then
+      [ VNode target_node; VInt (Random.int 1000) ]
+    else [ VNode target_node ]
+  in
+  let op = Env.find prog.client_ops op_name in
+  let env = Env.create 1024 in
+  List.iter2 (fun formal actual -> Env.add env formal actual) op.formals actuals;
+
+  let new_op_id =
+    operation_id_counter := !operation_id_counter + 1;
+    !operation_id_counter
+  in
+
+  let invocation =
+    {
+      client_id;
+      op_action = op.name;
+      kind = Invocation;
+      payload = actuals;
+      unique_id = new_op_id;
+    }
+  in
+  DA.add global_state.history invocation;
+  let new_continuation value =
+    let response =
+      {
+        client_id;
+        op_action = op.name;
+        kind = Response;
+        payload = [ value ];
+        unique_id = new_op_id;
+      }
+    in
+    DA.add global_state.history response;
+    schedule_random_op global_state prog operation_id_counter client_id
+  in
+
+  let record =
+    {
+      pc = op.entry;
+      node = client_id;
+      continuation = new_continuation;
+      env;
+      id = new_op_id;
+      x = 0.4;
+      f = (fun x -> x /. 2.0);
+    }
+  in
+  global_state.records <- record :: global_state.records
+
+let start_random_client_loops (global_state : state) (prog : program)
+    (operation_id_counter : int ref) : unit =
+  let clients_to_start = global_state.free_clients in
+  global_state.free_clients <- [];
+
+  (* Empty the list, as they will be permanently busy *)
+  Printf.printf "Starting random work loops for %d clients...\n"
+    (List.length clients_to_start);
+  List.iter
+    (fun client_id ->
+      schedule_random_op global_state prog operation_id_counter client_id)
+    clients_to_start
 
 let init_clients (global_state : state) (prog : program) : unit =
   for i = 0 to num_clients - 1 do
     let client_id = num_servers + i in
     let init_fn = Env.find prog.client_ops "BASE_CLIENT_INIT" in
-    let env = Env.create 91 in
+    let env = Env.create 1024 in
     let record =
       {
         pc = init_fn.entry;
@@ -216,7 +296,7 @@ let init_nodes (global_state : state) (prog : program) : unit =
       let init_fn = Env.find prog.rpc name in
       for i = 0 to num_servers - 1 do
         let node_id = i in
-        let env = Env.create 91 in
+        let env = Env.create 1024 in
         let record =
           {
             pc = init_fn.entry;
@@ -246,11 +326,12 @@ let interp (compiled_json : string) (intermediate_output : string)
 
   (* Load the program from the compiled JSON file *)
   let prog = load_program_from_file compiled_json in
-
+  let operation_id_counter = ref 0 in
   init_clients global_state prog;
   init_nodes global_state prog;
-  init_topology topology global_state prog;
-  schedule_vr_executions global_state prog;
+  init_topology topology global_state prog operation_id_counter;
+  (* schedule_vr_executions global_state prog operation_id_counter; *)
+  start_random_client_loops global_state prog operation_id_counter;
 
   bootlegged_sync_exec global_state prog randomly_drop_msgs cut_tail_from_mid
     sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs;

@@ -38,10 +38,15 @@ First, generate an execution trace. Second, check if that trace is linearizable.
 
 ### Generate input JSON using spur
 
-Use spur to generate the input JSON specification file:
+Use the `compile.sh` script to compile a spur specification to `output.json`:
+```
+./compile.sh bin/spur/simple.spur
+```
+
+Alternatively, you can use spur directly:
 ```
 cd spur
-# Use spur to generate your input JSON specification
+cargo run --release -- specs/simple.spur ../output.json
 ```
 
 ### Generate execution trace
