@@ -1,5 +1,6 @@
 import csv
 import sys
+import json
 from enum import Enum
 import argparse
 
@@ -7,6 +8,7 @@ from z3 import *
 
 
 # TODO support inv calls without paired resp
+
 
 class CallType(Enum):
     INV = True
@@ -25,6 +27,8 @@ ValueType = int
 ProcessType = str
 
 unique_id = 0
+
+
 def get_unique_id():
     global unique_id
     unique_id += 1
@@ -52,7 +56,9 @@ class Operation:
         self.resp = resp
 
     def __str__(self):
-        return "{0}_{1}_{2}_proc{3}_{4}".format(self.cmd, self.key, self.val, self.proc, self.unique_id)
+        return "{0}_{1}_{2}_proc{3}_{4}".format(
+            self.cmd, self.key, self.val, self.proc, self.unique_id
+        )
         # return "cmd: {0}, key: {1}, inv: {2}, resp: {3}, val: {4}" \
         #     .format(self.cmd, self.key, self.inv, self.resp, self.val)
 
@@ -67,7 +73,8 @@ class Action:
 
     def __str__(self):
         return "Action(proc={0},call={1},cmd={2},k={3},val={4})".format(
-            self.proc, self.call, self.cmd, self.k, self.val)
+            self.proc, self.call, self.cmd, self.k, self.val
+        )
 
 
 class ConstraintsGenerator:
@@ -81,10 +88,15 @@ class ConstraintsGenerator:
     def __str__(self):
         result = ""
         for op in self.predecessors.keys():
-            result += str([str(p) for p in self.predecessors[op]]) + \
-                      " <-- " + str(op) + " --> " + \
-                      str([str(s) for s in self.successors[op]]) + '\n'
-        result += '\n'
+            result += (
+                str([str(p) for p in self.predecessors[op]])
+                + " <-- "
+                + str(op)
+                + " --> "
+                + str([str(s) for s in self.successors[op]])
+                + "\n"
+            )
+        result += "\n"
         for read_op, write_op in self.matches.items():
             result += "Match(" + str(read_op) + ", " + str(write_op) + ")\n"
 
@@ -106,14 +118,16 @@ class ConstraintsGenerator:
             print("action", action)
             if action.call == CallType.INV:
                 if action.cmd == Command.WRITE:
-                    proc2Op[action.proc] = Operation(action.proc, action.cmd, timestamp,
-                                                     action.k, val=action.val)
+                    proc2Op[action.proc] = Operation(
+                        action.proc, action.cmd, timestamp, action.k, val=action.val
+                    )
                 elif action.cmd == Command.READ:
-                    proc2Op[action.proc] = Operation(action.proc, action.cmd, timestamp,
-                                                     action.k)
+                    proc2Op[action.proc] = Operation(
+                        action.proc, action.cmd, timestamp, action.k
+                    )
 
             elif action.call == CallType.RESP:
-                print ("action.proc", action.proc)
+                print("action.proc", action.proc)
                 op = proc2Op[action.proc]
                 op.set_resp(timestamp)
                 if op.cmd == Command.READ:
@@ -135,14 +149,14 @@ class ConstraintsGenerator:
 
                     if k.resp < op.inv:
                         self.predecessors[op].add(k)
-        
+
         # take care of operations that have invocations but not responses
         print(len(proc2Op))
         i = len(actions)
         for proc, op in proc2Op.items():
 
             print("proc", proc, "op", op)
-            # a schedule with open reads is equivalent to the schedule 
+            # a schedule with open reads is equivalent to the schedule
             # with the open reads removed.
             if op.cmd == Command.READ:
                 continue
@@ -150,13 +164,13 @@ class ConstraintsGenerator:
             timestamp = i
             i = i + 1
             if op.cmd == Command.WRITE:
-                op.set_resp(timestamp)  
-            
+                op.set_resp(timestamp)
+
             self.successors[op] = set()
             for k in self.successors.keys():
                 if k == op:
                     continue
-                
+
                 if k.resp < op.inv:
                     self.successors[k].add(op)
 
@@ -181,9 +195,13 @@ class ConstraintsGenerator:
 
         for op in ops:
             # if op in self.already_matched:
-                # continue
-            if op.cmd == Command.WRITE and op.val == read_op.val and \
-                    op.inv <= read_op.resp and op.key == read_op.key:
+            # continue
+            if (
+                op.cmd == Command.WRITE
+                and op.val == read_op.val
+                and op.inv <= read_op.resp
+                and op.key == read_op.key
+            ):
                 self.matches[read_op] = op
                 self.successors[op].add(read_op)
                 self.predecessors[read_op].add(op)
@@ -259,8 +277,9 @@ def z3solver(cg):
 
             op_sym = symbols[op]
             succ_sym = symbols[succ]
-            solver.assert_and_track(And([op_sym < succ_sym]),
-                                    "rto {0} < {1}".format(op_sym, succ_sym))
+            solver.assert_and_track(
+                And([op_sym < succ_sym]), "rto {0} < {1}".format(op_sym, succ_sym)
+            )
             # solver.add(And([op_sym < succ_sym, op_sym > 0, succ_sym > 0]))
             # print("{0} < {1}".format(op_sym, succ_sym))
 
@@ -273,9 +292,10 @@ def z3solver(cg):
                 op_sym = symbols[op]
                 solver.assert_and_track(
                     Not(And([write_sym < op_sym, op_sym < read_sym])),
-                    "intervening write ~({0} < {1} < {2})".format(write_sym,
-                                                                  op_sym,
-                                                                  read_sym))
+                    "intervening write ~({0} < {1} < {2})".format(
+                        write_sym, op_sym, read_sym
+                    ),
+                )
                 # solver.add(Not(
                 #     And([write_sym < op_sym, op_sym < read_sym])
                 # ))
@@ -292,6 +312,22 @@ def z3solver(cg):
     return True, values
 
 
+def parse_json_value(json_str):
+    """
+    Parse a JSON-encoded value from the new CSV format.
+    Returns the actual value from the JSON structure.
+    """
+    if not json_str or json_str.strip() == "":
+        return None
+    try:
+        parsed = json.loads(json_str)
+        if isinstance(parsed, dict) and "value" in parsed:
+            return parsed["value"]
+        return parsed
+    except (json.JSONDecodeError, ValueError):
+        return json_str
+
+
 def parseTrace(outfile):
     actions = []
     with open(outfile, "r") as csvfile:
@@ -304,18 +340,30 @@ def parseTrace(outfile):
                 None,
             )
 
+            # Get all payload columns (Payload1, Payload2, etc.)
+            payload_values = []
+            i = 1
+            while f"Payload{i}" in row:
+                val = parse_json_value(row[f"Payload{i}"])
+                if val is not None:
+                    payload_values.append(val)
+                i += 1
+
             if action.call == CallType.INV and "write" in row["Action"]:
                 action.cmd = Command.WRITE
-                action.k = row["Payload"]
-                action.val = row["Value"]
+                # First payload is the key, second is the value
+                action.k = payload_values[0] if len(payload_values) > 0 else None
+                action.val = payload_values[1] if len(payload_values) > 1 else None
             elif action.call == CallType.RESP and "write" in row["Action"]:
                 action.cmd = Command.OK
             elif action.call == CallType.INV and "read" in row["Action"]:
                 action.cmd = Command.READ
-                action.k = row["Payload"]
+                # First payload is the key
+                action.k = payload_values[0] if len(payload_values) > 0 else None
             elif action.call == CallType.RESP and "read" in row["Action"]:
                 action.cmd = Command.OK
-                action.val = row["Node"]
+                # First payload is the return value (node)
+                action.val = payload_values[0] if len(payload_values) > 0 else None
             else:
                 continue
 
@@ -338,8 +386,9 @@ def main():
         print(cg)
         is_sat, solution = z3solver(cg)
         if is_sat:
-            sorted_ops = [str(op) for op, _ in
-                          sorted(solution.items(), key=lambda item: item[1])]
+            sorted_ops = [
+                str(op) for op, _ in sorted(solution.items(), key=lambda item: item[1])
+            ]
             print(" < ".join(sorted_ops))
             return 0
     return -1

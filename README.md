@@ -3,7 +3,7 @@
 The repository is organized as follows:
 
 ```
-bin/            # main.ml and specifications (for example, CRAQ.jenn)
+bin/            # main.ml and specifications (for example, VR.spur)
 lib/            # compiler front-end (lexer, parser, ast) here + simulator
 README.md       
 jennLang.opam   # ignore
