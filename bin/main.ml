@@ -1,5 +1,6 @@
 open Mylib.Simulator
 open Mylib.Loader
+open Mylib.History
 open Yojson.Basic.Util
 
 type config = {
@@ -91,6 +92,17 @@ let print_global_nodes (nodes : value Env.t array) =
       print_endline "")
     nodes
 
+let find_client_op_by_suffix (prog : program) (suffix : string) : string =
+  let op_name =
+    Env.fold
+      (fun name _ acc ->
+        if BatString.ends_with name suffix then Some name else acc)
+      prog.client_ops None
+  in
+  match op_name with
+  | Some name -> name
+  | None -> failwith ("Could not find a client operation with suffix: " ^ suffix)
+
 let init_topology (topology : string) (global_state : state) (prog : program) :
     unit =
   match topology with
@@ -151,8 +163,9 @@ let init_topology (topology : string) (global_state : state) (prog : program) :
   | "STAR" -> raise (Failure "Not implemented STAR topology")
   | "RING" -> raise (Failure "Not implemented RING topology")
   | "FULL" ->
+      let init_fn_name = find_client_op_by_suffix prog "_init" in
       for i = 0 to num_servers - 1 do
-        schedule_client global_state prog "23_init"
+        schedule_client global_state prog init_fn_name
           [ VNode i; VList (ref (List.init num_servers (fun j -> VNode j))) ]
           0;
         sync_exec global_state prog false false false [] false
@@ -161,10 +174,12 @@ let init_topology (topology : string) (global_state : state) (prog : program) :
 
 (* Corrected *)
 let schedule_vr_executions (global_state : state) (prog : program) : unit =
-  let scheduler = schedule_client global_state prog in
-  scheduler "24_newEntry" [ VNode 1; VInt 101 ] 0;
-  scheduler "24_newEntry" [ VNode 0; VInt 201 ] 0;
-  scheduler "24_newEntry" [ VNode 0; VInt 301 ] 0
+  let scheduler prog_name =
+    schedule_client global_state prog (find_client_op_by_suffix prog prog_name)
+  in
+  scheduler "newEntry" [ VNode 1; VInt 101 ] 0;
+  scheduler "newEntry" [ VNode 0; VInt 201 ] 0;
+  scheduler "newEntry" [ VNode 0; VInt 301 ] 0
 
 let init_clients (global_state : state) (prog : program) : unit =
   for i = 0 to num_clients - 1 do
@@ -239,31 +254,7 @@ let interp (compiled_json : string) (intermediate_output : string)
 
   bootlegged_sync_exec global_state prog randomly_drop_msgs cut_tail_from_mid
     sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs;
-  let oc = open_out intermediate_output in
-  Printf.fprintf oc "ClientID,Kind,Action,Node,Payload,Value\n";
-  DA.iter
-    (fun op ->
-      Printf.fprintf oc "%d," op.client_id;
-      (match op.kind with
-      | Response -> Printf.fprintf oc "Response,"
-      | Invocation -> Printf.fprintf oc "Invocation,");
-      Printf.fprintf oc "%s," op.op_action;
-      List.iter
-        (fun v ->
-          match v with
-          | VInt i -> Printf.fprintf oc "%d," i
-          | VBool b -> Printf.fprintf oc "%s," (string_of_bool b)
-          | VString s -> Printf.fprintf oc "%s," s
-          | VNode n -> Printf.fprintf oc "%d," n
-          | VFuture _ -> Printf.fprintf oc "TODO implement VFuture"
-          | VMap _ -> Printf.fprintf oc "TODO implement VMap"
-          | VOption _ -> Printf.fprintf oc "TODO implement VOptions"
-          | VList _ -> Printf.fprintf oc "TODO implement VList"
-          | VUnit -> Printf.fprintf oc "TODO implement VUnit"
-          | VTuple _ -> Printf.fprintf oc "TODO implement VTuple")
-        op.payload;
-      Printf.fprintf oc "\n")
-    global_state.history;
+  save_history_to_csv global_state.history intermediate_output;
   print_global_nodes global_state.nodes
 
 let handle_arguments () : string * string * string =

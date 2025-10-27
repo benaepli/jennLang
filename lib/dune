@@ -7,13 +7,14 @@
  (name mylib)
  (libraries
   core
+  csv
   batteries
   yojson
   ppx_deriving
   ppx_deriving.show
   ppx_deriving.ord
   ppx_deriving.eq)
- (modules ast parser lexer simulator loader)
+ (modules ast parser lexer simulator loader history)
  (preprocess
   (pps ppx_deriving.ord ppx_deriving.eq ppx_deriving.show)))
 
