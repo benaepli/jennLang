@@ -36,12 +36,23 @@ git clone https://github.com/jl3953/jennLang
 
 First, generate an execution trace. Second, check if that trace is linearizable.
 
+### Generate input JSON using spur
+
+Use spur to generate the input JSON specification file:
+```
+cd spur
+# Use spur to generate your input JSON specification
+```
+
+### Generate execution trace
+
 Generate an execution trace to `output.csv`. A huge amount of debug statements may fly across your screen--that is okay to ignore.
 ```
 eval $(opam env --switch=default) # run once at the start of each session
 dune exec _build/default/bin/main.exe
 ```
 Notes:
+- The input specification file should be generated using spur (see above).
 - You may modify the input specification file by modifying [this line](https://github.com/jl3953/jennLang/blob/main/bin/main.ml#L352).
 - You may modify the output trace file by modifying [this line](https://github.com/jl3953/jennLang/blob/main/bin/main.ml#L327).
 
