@@ -39,6 +39,7 @@ and rhs =
   | Minus of rhs * rhs
   | Times of rhs * rhs
   | Div of rhs * rhs
+  | Mod of rhs * rhs
   | PollForResps of rhs * rhs
   | PollForAnyResp of rhs
   | NextResp of rhs
@@ -61,9 +62,9 @@ and literal =
 
 and func_call = FuncCall of string * param list
 
-and rpc_call = 
-  | RpcCall of string * func_call
-  | RpcAsyncCall of string * func_call
+and rpc_call =
+  | RpcCall of rhs * func_call
+  | RpcAsyncCall of rhs * func_call
 
 and lhs = 
   | VarLHS of string
@@ -100,6 +101,6 @@ type var_init = VarInit of type_def * string * rhs
 
 type role_def = RoleDef of string * param list * var_init list * func_def list
 
-type client_def = ClientDef of func_def list
+type client_def = ClientDef of var_init list * func_def list
 
 type prog = Prog of role_def * client_def

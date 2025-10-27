@@ -4,6 +4,7 @@
 %}
 
 %token <string> ID
+%token <string> STRING
 %token <bool> TRUE FALSE
 %token <int> INT
 %token AND
@@ -51,9 +52,9 @@
 %token SET_TIMEOUT
 %token SLASH
 %token STAR
+%token PERCENT
 %token MATCH
 %token TAIL
-%token QUOTE
 %token VAR
 %token EOF
 
@@ -61,9 +62,9 @@
 %right BANG
 %left AND
 %left OR
-%left STAR SLASH
-%left PLUS MINUS
 %nonassoc EQUALS_EQUALS NOT_EQUALS LEFT_ANGLE_BRACKET RIGHT_ANGLE_BRACKET LEFT_ANGLE_BRACKET_EQUALS RIGHT_ANGLE_BRACKET_EQUALS EXISTS
+%left PLUS MINUS
+%left STAR SLASH PERCENT
 // %left COMMA
 
 %type <Ast.prog> program
@@ -99,8 +100,7 @@ func_defs:
     { f :: fs }
 
 statements:
-  | s = statement 
-    { s :: [] }
+  | { [] }
   | s = statement ss = statements
     { s :: ss }
 
@@ -135,13 +135,9 @@ cond_stmts:
     { i :: el @ [IfElseIf(Bool(true), else_body)] }
 
 rpc_call:
-  | RPC_CALL LEFT_PAREN host = ID COMMA func_call = func_call RIGHT_PAREN
+  | RPC_CALL LEFT_PAREN host = right_side COMMA func_call = func_call RIGHT_PAREN
     { RpcCall(host, func_call) }
-  | RPC_CALL LEFT_PAREN QUOTE host = ID QUOTE COMMA func_call = func_call RIGHT_PAREN
-    { RpcCall(host, func_call) }
-  | RPC_ASYNC_CALL LEFT_PAREN host = ID COMMA func_call = func_call RIGHT_PAREN
-    { RpcAsyncCall(host, func_call) }
-  | RPC_ASYNC_CALL LEFT_PAREN QUOTE host = ID QUOTE COMMA func_call = func_call RIGHT_PAREN
+  | RPC_ASYNC_CALL LEFT_PAREN host = right_side COMMA func_call = func_call RIGHT_PAREN
     { RpcAsyncCall(host, func_call) }
 
 type_def:
@@ -184,10 +180,8 @@ collection_access:
 literals:
   | OPTIONS LEFT_PAREN opts = options RIGHT_PAREN
     { Options(opts) }
-  | QUOTE s = ID QUOTE
+  | s = STRING
     { String(s) }
-  | QUOTE QUOTE
-    { String("") }
   | i = integer
     { i }
 
@@ -210,8 +204,7 @@ var_init:
     { VarInit(typ, id, right_side) }
 
 var_inits:
-  | v = var_init SEMICOLON
-    {v :: []}
+  | { [] }
   | v = var_init SEMICOLON vs = var_inits
     {v :: vs}
 
@@ -303,6 +296,8 @@ right_side:
     { Times(i1, i2) }
   | i1 = right_side SLASH i2 = right_side
     { Div(i1, i2) }
+  | i1 = right_side PERCENT i2 = right_side
+    { Mod(i1, i2) }
   | POLL_FOR_RESPS LEFT_PAREN resps = right_side COMMA rhs2 = right_side RIGHT_PAREN
     { PollForResps(resps, rhs2) }
   | POLL_FOR_ANY_RESP LEFT_PAREN resps = right_side RIGHT_PAREN
@@ -385,6 +380,7 @@ role_def:
 
 client_def:
   | CLIENT_INTERFACE LEFT_CURLY_BRACE
+    var_inits = var_inits
     func_defs = func_defs
     RIGHT_CURLY_BRACE
-    { ClientDef(func_defs) }
+    { ClientDef(var_inits, func_defs) }

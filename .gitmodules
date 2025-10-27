@@ -1,0 +1,3 @@
+[submodule "spur"]
+	path = spur
+	url = https://github.com/benaepli/spur.git

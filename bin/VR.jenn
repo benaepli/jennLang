@@ -1,0 +1,338 @@
+Node {
+    int self = 0;
+    List replicas = [];
+    
+    int view_number = 0;
+    int status = 0; // 0 is normal, 1 is view-change, 2 is recovering
+    int op_number = 0;
+
+    List log = [];
+    int commit_number = 0;
+
+    int normal_view = 0;
+
+    map<int, int> prepare_ok_counts = {};
+    int start_view_change_count = 0;
+    int do_view_change_count = 0;
+    List do_view_change_messages = [];
+    int recovery_response_count = 0;
+
+    int ticks_since_heartbeat = 0;
+    int HEARTBEAT_TIMEOUT = 5;
+
+    func Init(me, peers) -> None {
+        self = me;
+
+        for (i = 0; i < len(peers); i = i+1) {
+            replicas = append(replicas, peers[i]);
+        }
+
+        var i = primary_of(view_number);
+    }
+
+    func primary_of(v) -> int {
+        var num_servers = len(replicas) + 1;
+        return v % num_servers;
+    }
+
+    func f() -> int {
+        var num_servers = len(replicas) + 1;
+        return (num_servers - 1) / 2;
+    }
+
+    func Prepare(other_view, other_request, other_op_number, other_commit_number) -> None {
+        ticks_since_heartbeat = 0;
+
+        print("[Prepare] Node ");
+        print(self);
+        print(" received Prepare: view=");
+        print(other_view);
+        print(" op_num=");
+        print(other_op_number);
+        print(" my_op_num=");
+        print(op_number);
+        print("\n");
+
+        if (other_view == view_number && other_op_number == op_number + 1) {
+            op_number = op_number + 1;
+            log = append(log, {"view": view_number, "op": other_request});
+
+            // The backup can update its commit number from the primary's message.
+            if (other_commit_number > commit_number) {
+                commit_number = other_commit_number;
+            }
+
+            // Acknowledge the request by sending a PrepareOK to the primary.
+            var primary_node = primary_of(view_number);
+            print("[PrepareOK] Node ");
+            print(self);
+            print(" sending PrepareOK to node ");
+            print(primary_node);
+            print("\n");
+            rpc_async_call(primary_node, PrepareOK(view_number, op_number, self));
+        }
+    }
+
+    func PrepareOK(other_view, other_op_number, other_replica_id) -> None {
+        var current_primary = primary_of(view_number);
+
+        print("[PrepareOK] Node ");
+        print(self);
+        print(" received PrepareOK from ");
+        print(other_replica_id);
+        print(" for op ");
+        print(other_op_number);
+        print("\n");
+
+        // Only the primary for the current view processes PrepareOK messages.
+        if (self == current_primary && other_view == view_number) {
+            if (!(other_op_number exists prepare_ok_counts)) {
+                prepare_ok_counts[other_op_number] = 0;
+            }
+            prepare_ok_counts[other_op_number] = prepare_ok_counts[other_op_number] + 1;
+
+            // If enough backups have acknowledged and this op is next to be committed...
+            var mid = f();
+            if (prepare_ok_counts[other_op_number] >= mid && other_op_number > commit_number) {
+                print("[COMMIT] Node ");
+                print(self);
+                print(" committing op ");
+                print(other_op_number);
+                print("\n");
+                commit_number = other_op_number;
+
+                // ...broadcast the new commit number to all backups.
+                for (i = 0; i < len(replicas); i = i+1) {
+                    if (replicas[i] != self) {
+                        rpc_async_call(replicas[i], Commit(view_number, commit_number));
+                    }
+                }
+            }
+        }
+    }
+
+    func Commit(other_view, other_commit_number) -> None {
+        ticks_since_heartbeat = 0; // Another form of heartbeat from the primary.
+        
+        // Backups update their commit number upon receiving a Commit message.
+        if (other_view == view_number && other_commit_number > commit_number) {
+            commit_number = other_commit_number;
+        }
+    }
+
+    func enter_view_change(new_view) -> None {
+        status = 1;
+        view_number = new_view;
+        start_view_change_count = 1;
+
+        do_view_change_count = 0;
+        do_view_change_messages = [];
+    }
+
+    func enter_normal_mode(v, new_log, op_n, commit_n) -> None {
+        status = 0;
+        view_number = v;
+        log = new_log; 
+        op_number = op_n;
+        commit_number = commit_n;
+        normal_view = v;
+
+        ticks_since_heartbeat = 0;
+        do_view_change_count = 0;
+        do_view_change_messages = [];
+    }
+
+    func StartViewChange(new_view, replica_id) -> None {
+        if (new_view > view_number) {
+            enter_view_change(new_view);
+
+            // Broadcast the message to ensure other replicas also advance to the new view.
+            for (i = 0; i < len(replicas); i = i+1) {
+                 if (replicas[i] != self) {
+                    rpc_async_call(replicas[i], StartViewChange(view_number, self));
+                }
+            }
+        } 
+        else if (new_view == view_number && status == 1) {
+            start_view_change_count = start_view_change_count + 1;
+            
+            // Check if a quorum of f+1 replicas has agreed to the view change.
+            var f = (len(replicas) - 1) / 2;
+            var quorum = f + 1;
+
+            if (start_view_change_count == quorum) {
+                var new_primary = primary_of(view_number);
+                rpc_async_call(new_primary, DoViewChange(view_number, log, normal_view, op_number, commit_number));
+            }
+        }
+    }
+
+    func DoViewChange(new_view, sender_log, sender_normal_view, sender_op_number, sender_commit_number) -> None {
+        var current_primary = primary_of(new_view);
+        // This replica is the primary for the new view. It collects DoViewChange
+        // messages until it has a quorum.
+        if (self == current_primary && new_view == view_number) {
+            do_view_change_count = do_view_change_count + 1;
+            
+            // Store the state information from the sending replica.
+            do_view_change_messages = append(do_view_change_messages, {
+                "log": sender_log,
+                "normal_view": sender_normal_view,
+                "op_number": sender_op_number,
+                "commit_number": sender_commit_number
+            });
+
+            var mid = f();
+            var quorum = f + 1;
+            
+            // Once f+1 messages are received, the primary can establish the new state.
+            if (do_view_change_count == quorum) {
+                var best_log = log;
+                var best_normal_view = normal_view;
+                var best_op_number = op_number;
+                var max_commit_number = commit_number;
+
+                // The primary selects the log with the highest normal_view.
+                // Ties are broken by the highest op_number.
+                for (i = 0; i < len(do_view_change_messages); i=i+1) {
+                    var msg = do_view_change_messages[i];
+                    if (msg["normal_view"] > best_normal_view) {
+                        best_normal_view = msg["normal_view"];
+                        best_op_number = msg["op_number"];
+                        best_log = msg["log"];
+                    } else if (msg["normal_view"] == best_normal_view && msg["op_number"] > best_op_number) {
+                        best_op_number = msg["op_number"];
+                        best_log = msg["log"];
+                    }
+
+                    // The new commit_number is the highest one seen among the quorum.
+                    if (msg["commit_number"] > max_commit_number) {
+                        max_commit_number = msg["commit_number"];
+                    }
+                }
+                
+                enter_normal_mode(new_view, best_log, best_op_number, best_commit_number);
+
+                // Broadcast the new view and state to all replicas.
+                for (i = 0; i < len(replicas); i=i+1) {
+                    rpc_async_call(replicas[i], StartView(view_number, log, op_number, commit_number));
+                }
+            }
+        }
+    }
+
+    func StartView(new_view, new_log, new_op_number, new_commit_number) -> None {
+        if (new_view >= view_number) {
+            // Update state using the helper function.
+            enter_normal_mode(new_view, new_log, new_op_number, new_commit_number);
+
+            var new_primary = primary_of(view_number);
+            if (self != new_primary) {
+                for (i = commit_number + 1; i <= op_number; i = i+1) {
+                    rpc_async_call(new_primary, PrepareOK(view_number, i, self));
+                }
+            }
+        }
+    }
+
+    func Recovery(replica_id, nonce) -> None {
+
+    }
+
+    func RecoveryResponse(nonce, view, log, op_number, commit_number) -> None {
+
+    }
+
+
+    func NewEntry(cmd) -> bool {
+        var current_primary = primary_of(view_number);
+        print("[NewEntry] Node ");
+        print(self);
+        print(" got NewEntry, primary is ");
+        print(current_primary);
+        print("\n");
+
+        if (self != current_primary) {
+            // This node isn't the primary; it can't process new client entries.
+            return false;
+        }
+
+        // As the primary, assign a new op_number and append the command to the log.
+        op_number = op_number + 1;
+        log = append(log, {"view": view_number, "op": cmd});
+        prepare_ok_counts[op_number] = 0;
+
+        print("[NewEntry] Added to log, op_number=");
+        print(op_number);
+        print(" replicas=");
+        print(len(replicas));
+        print("\n");
+
+        // If this is the only replica, the operation is committed instantly.
+        if (len(replicas) == 1) {
+            commit_number = op_number;
+            return true;
+        }
+
+        // Send Prepare messages to all backup replicas.
+        for (i = 0; i < len(replicas); i = i+1) {
+            print("[NewEntry] Checking replica ");
+            print(replicas[i]);
+            print("\n");
+            if (replicas[i] != self) {
+                print("[NewEntry] Sending Prepare to ");
+                print(replicas[i]);
+                print("\n");
+                rpc_async_call(replicas[i], Prepare(view_number, cmd, op_number, commit_number));
+            }
+        }
+        return true;
+    }
+
+    func Tick() -> None {
+        var current_primary = primary_of(view_number);
+
+        if (self == current_primary) {
+            // The primary periodically sends a Commit message as a heartbeat
+            // to let backups know it is still alive.
+            for (i = 0; i < len(replicas); i = i+1) {
+                if (replicas[i] != self) {
+                    rpc_async_call(replicas[i], Commit(view_number, commit_number));
+                }
+            }
+        } else {
+            // Backups increment a counter each tick. Receiving a message from
+            // the primary resets this counter.
+            ticks_since_heartbeat = ticks_since_heartbeat + 1;
+
+            // If the counter exceeds the timeout, the backup suspects the primary
+            // has failed and initiates a view change.
+            if (ticks_since_heartbeat > HEARTBEAT_TIMEOUT) {
+                enter_view_change(view_number + 1);
+
+                // Broadcast a StartViewChange message to all other replicas.
+                for (i = 0; i < len(replicas); i = i+1) {
+                     if (replicas[i] != self) {
+                        rpc_async_call(replicas[i], StartViewChange(view_number, self));
+                    }
+                }
+            }
+        }
+    }
+}
+
+ClientInterface {
+        
+    func init(dest, replicas) -> None {
+        print("[client] init replica ");
+        print(dest);
+        print("\n");
+
+        rpc_call(dest, BASE_NODE_INIT());
+        rpc_async_call(dest, Init(dest, replicas));
+    }
+
+    func newEntry(dest, cmd) -> bool {
+        return rpc_call(dest, NewEntry(cmd));
+    }
+}
