@@ -192,15 +192,24 @@ let _schedule_vr_executions (global_state : state) (prog : program)
 let rec schedule_random_op (global_state : state) (prog : program)
     (operation_id_counter : int ref) (client_id : int) : unit =
   Random.self_init ();
+  let r = Random.float 1.0 in
+
   let op_name_suffix =
-    if Random.bool () then "newEntry" else "getCommittedLog"
+    if r < 0.01 then "simulateTimeout"
+      (* 1% chance of triggering a view change *)
+    else if r < 0.50 then "newEntry" (* 49% chance of newEntry *)
+    else "getCommittedLog" (* 50% chance of getCommittedLog *)
   in
   let op_name = find_client_op_by_suffix prog op_name_suffix in
+
   let target_node = Random.int num_servers in
+
   let actuals =
     if op_name_suffix = "newEntry" then
       [ VNode target_node; VInt (Random.int 1000) ]
-    else [ VNode target_node ]
+    else
+      (* Both getCommittedLog and simulateTimeout just take a target node *)
+      [ VNode target_node ]
   in
   let op = Env.find prog.client_ops op_name in
   let env = Env.create 1024 in

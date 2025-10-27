@@ -41,11 +41,7 @@ role Node {
     let do_view_change_count: int = 0;
     let do_view_change_messages: list<DoViewChangeMsg> = [];
     let recovery_response_count: int = 0;
-    let ticks_since_heartbeat: int = 0;
-
     
-    let HEARTBEAT_TIMEOUT: int = 5;
-
     // Initializes the replica's state.
     func Init(me: int, peers: list<Node>) {
         self = me;
@@ -108,8 +104,6 @@ role Node {
 
     // Handles a Prepare message from the primary.
     func Prepare(other_view: int, other_request: Command, other_op_number: int, other_commit_number: int) {
-        ticks_since_heartbeat = 0;
-
         if (other_view != view_number) { return (); } // Wrong view
         if (other_op_number <= op_number) { return (); } // Old, already processed
         
@@ -147,7 +141,6 @@ role Node {
 
     // Handles a Commit message from the primary (also serves as a heartbeat).
     func Commit(other_view: int, other_commit_number: int) {
-        ticks_since_heartbeat = 0;
         if (other_view == view_number and other_commit_number > commit_number) {
             commit_number = other_commit_number;
             apply_committed_entries();
@@ -169,7 +162,6 @@ role Node {
         op_number = op_n;
         commit_number = commit_n;
         normal_view = v;
-        ticks_since_heartbeat = 0;
         do_view_change_count = 0;
         do_view_change_messages = [];
 
@@ -281,7 +273,7 @@ role Node {
         return true;
     }
 
-    // A periodic function to handle heartbeats and timeouts.
+    // A periodic function for the primary to send heartbeats.
     func Tick() {
         let current_primary: Node = primary_of(view_number);
         if (replicas[self] == current_primary) {
@@ -290,15 +282,19 @@ role Node {
                     rpc_async_call(replicas[i], Commit(view_number, commit_number));
                 }
             }
-        } else {
-            ticks_since_heartbeat = ticks_since_heartbeat + 1;
-            if (ticks_since_heartbeat > HEARTBEAT_TIMEOUT) {
-                enter_view_change(view_number + 1);
-                for (let i: int = 0; i < len(replicas); i = i + 1) {
-                     if (i != self) {
-                        rpc_async_call(replicas[i], StartViewChange(view_number, replicas[self]));
-                     }
-                }
+        }
+    }
+
+    // Simulates a timeout event on a backup replica.
+    func SimulateTimeout() {
+        let current_primary: Node = primary_of(view_number);
+        // Only non-primaries should time out
+        if (replicas[self] != current_primary) { 
+            enter_view_change(view_number + 1);
+            for (let i: int = 0; i < len(replicas); i = i + 1) {
+                 if (i != self) {
+                    rpc_async_call(replicas[i], StartViewChange(view_number, replicas[self]));
+                 }
             }
         }
     }
@@ -321,5 +317,10 @@ ClientInterface {
 
     func getCommittedLog(dest: Node) -> list<Command> {
         return rpc_call(dest, GetCommittedLog());
+    }
+
+    // Triggers a simulated timeout at the destination node.
+    func simulateTimeout(dest: Node) {
+        rpc_async_call(dest, SimulateTimeout());
     }
 }
