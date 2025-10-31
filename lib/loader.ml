@@ -84,6 +84,10 @@ let rec expr_of_yojson json : expr =
           match to_list value with
           | [ e1; e2 ] -> EKeyExists (expr_of_yojson e1, expr_of_yojson e2)
           | _ -> failwith "EKeyExists expects 2 args")
+      | "EMapErase" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EMapErase (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EKeyExists expects 2 args")
       | "EListLen" -> EListLen (expr_of_yojson value)
       | "EListAccess" -> (
           match to_list value with

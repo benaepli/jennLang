@@ -45,6 +45,7 @@ type expr =
   | EGreaterThan of expr * expr
   | EGreaterThanEquals of expr * expr
   | EKeyExists of expr * expr
+  | EMapErase of expr * expr
   | EListLen of expr
   | EListAccess of expr * int
   | EPlus of expr * expr
@@ -229,6 +230,8 @@ let rec to_string_expr (e : expr) : string =
       "EGreaterThanEquals(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
   | EKeyExists (k, mp) ->
       "EKeyExists(" ^ to_string_expr k ^ ", " ^ to_string_expr mp ^ ")"
+  | EMapErase (k, mp) ->
+      "EMapErase(" ^ to_string_expr k ^ ", " ^ to_string_expr mp ^ ")"
   | EListLen e -> "EListLen(" ^ to_string_expr e ^ ")"
   | EListAccess (e, i) ->
       "EListAccess(" ^ to_string_expr e ^ ", " ^ string_of_int i ^ ")"
@@ -609,6 +612,15 @@ let rec eval (env : record_env) (expr : expr) : value =
           Printf.printf "%s is not a map, key %s may not exist\n"
             (to_string_expr mp) (to_string_expr key);
           failwith "EKeyExists eval fail")
+  | EMapErase (key, mp) -> (
+      match (eval env key, eval env mp) with
+      | k, VMap m ->
+          ValueMap.remove m k;
+          VMap m
+      | _ ->
+          Printf.printf "%s is not a map, cannot erase key %s\n"
+            (to_string_expr mp) (to_string_expr key);
+          failwith "EMapErase eval fail")
   | EListLen e -> (
       match eval env e with
       | VList l -> VInt (List.length !l)
