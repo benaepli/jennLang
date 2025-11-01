@@ -63,6 +63,9 @@ type expr =
   | ENil
   | EUnwrap of expr
   | ECoalesce of expr * expr
+  | ECreatePromise
+  | ECreateFuture of expr
+  | ECreateLock
 [@@deriving ord]
 
 type lhs = LVar of string | LAccess of expr * expr | LTuple of string list
@@ -72,6 +75,7 @@ type instr =
   | Assign of lhs * expr (* jenndbg probably assigning map values? *)
   | Async of lhs * expr * string * expr list (* jenndbg RPC*)
   | Copy of lhs * expr
+  | Resolve of lhs * expr
     (* | Write of string * string (*jenndbg write a value *) *)
 [@@deriving ord]
 
@@ -88,6 +92,7 @@ module rec Value : sig
     | VList of t list ref
     | VOption of t option
     | VFuture of t option ref
+    | VLock of bool ref
     | VNode of int
     | VString of string
     | VUnit
@@ -100,6 +105,7 @@ end = struct
     | VList of t list ref
     | VOption of t option
     | VFuture of t option ref
+    | VLock of bool ref
     | VNode of int
     | VString of string
     | VUnit
@@ -133,6 +139,7 @@ end = struct
         try Array.for_all2 equal a1 a2 with Invalid_argument _ -> false)
     | VList l1, VList l2 -> l1 == l2
     | VFuture f1, VFuture f2 -> f1 == f2
+    | VLock l1, VLock l2 -> l1 == l2
     | VMap m1, VMap m2 -> m1 == m2
     | _ -> false
 
@@ -147,6 +154,7 @@ end = struct
     | VTuple a -> Array.fold_left (fun acc x -> (23 * acc) + hash x) 5 a
     | VList l -> Hashtbl.hash l
     | VFuture f -> Hashtbl.hash f
+    | VLock l -> Hashtbl.hash l
     | VMap m -> Hashtbl.hash m
 end
 
@@ -160,6 +168,7 @@ type value = Value.t =
   | VList of value list ref
   | VOption of value option
   | VFuture of value option ref
+  | VLock of bool ref
   | VNode of int
   | VString of string
   | VUnit
@@ -189,6 +198,8 @@ type 'a label =
   | ForLoopIn of lhs * expr * 'a * 'a
   | Print of expr * 'a
   | Break of 'a
+  | Lock of expr * 'a
+  | Unlock of expr * 'a
 
 let rec to_string_expr (e : expr) : string =
   match e with
@@ -260,6 +271,9 @@ let rec to_string_expr (e : expr) : string =
   | EUnwrap e -> "EUnwrap(" ^ to_string_expr e ^ ")"
   | ECoalesce (e1, e2) ->
       "ECoalesce(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
+  | ECreatePromise -> "ECreatePromise"
+  | ECreateFuture e -> "ECreateFuture(" ^ to_string_expr e ^ ")"
+  | ECreateLock -> "ECreateLock"
 
 let to_string_lhs (l : lhs) : string =
   match l with
@@ -276,7 +290,10 @@ let to_string (l : 'a label) : string =
       | Assign (lhs, expr) ->
           "Instr(Assign(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr
           ^ "))"
-      | Copy (_, _) -> "instr copy")
+      | Copy (_, _) -> "instr copy"
+      | Resolve (lhs, expr) ->
+          "Instr(Resolve(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr
+          ^ "))")
   | Pause _ -> "Pause"
   | Await (lhs, expr, _) ->
       "Await(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr ^ ")"
@@ -285,6 +302,8 @@ let to_string (l : 'a label) : string =
   | ForLoopIn _ -> "ForLoopIn"
   | Print _ -> "Print"
   | Break _ -> "Break"
+  | Lock (e, _) -> "Lock(" ^ to_string_expr e ^ ")"
+  | Unlock (e, _) -> "Unlock(" ^ to_string_expr e ^ ")"
 
 let rec to_string_value (v : value) : string =
   match v with
@@ -307,6 +326,7 @@ let rec to_string_value (v : value) : string =
       "VFuture("
       ^ (match !f with Some v -> to_string_value v | None -> "None")
       ^ ")"
+  | VLock r -> "VLock(" ^ string_of_bool !r ^ ")"
   | VNode n -> "VNode(" ^ string_of_int n ^ ")"
   | VString s -> "" ^ s ^ ""
   | VUnit -> "VUnit"
@@ -461,6 +481,10 @@ let rec eval (env : record_env) (expr : expr) : value =
           Printf.printf "Collection %s is future, cannot index into using %s\n"
             (to_string_expr c) (to_string_expr k);
           failwith "EFind eval fail: collection is neither map nor string"
+      | VLock _ ->
+          Printf.printf "Collection %s is lock, cannot index into using %s\n"
+            (to_string_expr c) (to_string_expr k);
+          failwith "EFind eval fail: collection is neither map nor string"
       | VNode _ ->
           Printf.printf "Collection %s is node, cannot index into using %s\n"
             (to_string_expr c) (to_string_expr k);
@@ -507,6 +531,7 @@ let rec eval (env : record_env) (expr : expr) : value =
       | VOption o1, VOption o2 -> VBool (o1 = o2)
       | VMap _, _ -> failwith "EEqualsEquals fails with map"
       | VFuture _, _ -> failwith "EEqualsEquals fails with VFuture"
+      | VLock _, _ -> failwith "EEqualsEquals fails with VLock"
       | VList l1, VList l2 ->
           let rec list_eq (l1 : value list) (l2 : value list) : bool =
             match (l1, l2) with
@@ -532,7 +557,8 @@ let rec eval (env : record_env) (expr : expr) : value =
           | VList _ -> failwith "EEqualsEquals eval fail VInt, VList"
           | VOption _ -> VBool false
           | VUnit -> VBool false
-          | VTuple _ -> VBool false)
+          | VTuple _ -> VBool false
+          | VLock _ -> failwith "EEqualsEquals eval fail VInt, VLock")
       | VBool _, _ -> failwith "EEqualsEquals eval fail VBool"
       | VString _, _ -> failwith "EEqualsEquals eval fail VString"
       | VNode _, _ -> failwith "EEqualsEquals eval fail VNode"
@@ -649,16 +675,7 @@ let rec eval (env : record_env) (expr : expr) : value =
   | EMinus (e1, e2) -> (
       match (eval env e1, eval env e2) with
       | VInt i1, VInt i2 -> VInt (i1 - i2)
-      | VInt _, _ -> failwith "EMinus VInt fail"
-      | VBool _, _ -> failwith "EMinus VBool fail"
-      | VFuture _, _ -> failwith "EMinus VFuture fail"
-      | VList _, _ -> failwith "EMinus VList fail"
-      | VMap _, _ -> failwith "EMinus VMap fail"
-      | VOption _, _ -> failwith "EMinus VOption fail"
-      | VNode _, _ -> failwith "EMinus VNode fail"
-      | VString _, _ -> failwith "EMinus VString fail"
-      | VUnit, _ -> failwith "EMinus VUnit fail"
-      | VTuple _, _ -> failwith "EMinus VTuple fail")
+      | _ -> failwith "EMinus eval fail")
   | ETimes (e1, e2) -> (
       match (eval env e1, eval env e2) with
       | VInt i1, VInt i2 -> VInt (i1 * i2)
@@ -810,6 +827,9 @@ else poll_for_response tl *)
       | VOption (Some v) -> v
       | VOption None -> eval env e_default
       | _ -> failwith "Type error: Coalesce on non-optional")
+  | ECreatePromise -> VFuture (ref None)
+  | ECreateFuture e -> eval env e
+  | ECreateLock -> VLock (ref false)
 
 let eval_lhs (env : record_env) (lhs : lhs) : lvalue =
   match lhs with
@@ -917,6 +937,7 @@ let exec (state : state) (program : program) (record : record) =
             | VList _ -> failwith "Type error list"
             | VOption _ -> failwith "Type error option"
             | VFuture _ -> failwith "Type error future"
+            | VLock _ -> failwith "Type error lock"
             | VUnit -> failwith "Type error unit"
             | VTuple _ -> failwith "Type error tuple"
             | VString role -> (
@@ -946,7 +967,29 @@ let exec (state : state) (program : program) (record : record) =
                     state.records <- new_record :: state.records
                 | _ -> failwith "Type error idk what you are anymore"))
         | Assign (lhs, rhs) -> store lhs (eval env rhs) env
-        | Copy (lhs, rhs) -> copy lhs (eval env rhs) env);
+        | Copy (lhs, rhs) -> copy lhs (eval env rhs) env
+        | Resolve (lhs, rhs) -> (
+            let value_to_resolve = eval env rhs in
+            let promise_val =
+              match lhs with
+              | LVar var -> load var env
+              | LAccess (collection, key) -> eval env (EFind (collection, key))
+              | LTuple _ ->
+                  failwith
+                    ("Runtime error: Cannot resolve a tuple at "
+                   ^ to_string_lhs lhs)
+            in
+            match promise_val with
+            | VFuture r ->
+                if !r = None then r := Some value_to_resolve
+                else
+                  failwith
+                    ("Runtime error: Promise at " ^ to_string_lhs lhs
+                   ^ " already resolved")
+            | _ ->
+                failwith
+                  ("Type error: Attempted to resolve non-promise at "
+                 ^ to_string_lhs lhs)));
         loop ()
     | Cond (cond, bthen, belse) ->
         (match eval env cond with
@@ -954,6 +997,7 @@ let exec (state : state) (program : program) (record : record) =
         | VBool false -> record.pc <- belse
         | VInt _ -> failwith "Type error int"
         | VFuture _ -> failwith "Type error future"
+        | VLock _ -> failwith "Type error lock"
         | VMap _ -> failwith "Type error map"
         | VList _ -> failwith "Type error list"
         | VOption _ -> failwith "Type error option"
@@ -981,6 +1025,7 @@ do any work. *)
               record.pc <- next;
               loop ())
             else state.records <- record :: state.records
+        | VLock _ -> failwith "Type error lock"
         | VInt _ -> failwith "Type error int"
         | VMap _ -> failwith "Type error map"
         | VList _ -> failwith "Type error list"
@@ -1071,6 +1116,7 @@ do any work. *)
         | VNode _ -> failwith "Type error VNode"
         | VOption _ -> failwith "Type error VOption"
         | VFuture _ -> failwith "Type error VFuture"
+        | VLock _ -> failwith "Type error VLock"
         | VUnit -> failwith "Type error VUnit"
         | VTuple _ -> failwith "Type error VTuple")
     | Print (expr, next) ->
@@ -1079,6 +1125,32 @@ do any work. *)
         record.pc <- next;
         loop ()
     | Break _ -> raise Halt
+    | Lock (lock_expr, next) -> (
+        match eval env lock_expr with
+        | VLock lock_ref ->
+            if !lock_ref = false then (
+              (* Lock is free, acquire it *)
+              lock_ref := true;
+              record.pc <- next;
+              loop ())
+            else
+              (* Lock is held, re-queue the record to wait *)
+              (* This is the same behavior as Await on an unresolved VFuture  *)
+              state.records <- record :: state.records
+        | _ -> failwith "Type error: Attempted to 'Lock' a non-lock value")
+    | Unlock (lock_expr, next) -> (
+        match eval env lock_expr with
+        | VLock lock_ref ->
+            if !lock_ref = true then (
+              (* Lock is held, release it *)
+              lock_ref := false;
+              record.pc <- next;
+              loop ())
+            else
+              (* This is a double unlock, which is a logic error *)
+              failwith
+                "Runtime error: Attempted to 'Unlock' an already-unlocked lock"
+        | _ -> failwith "Type error: Attempted to 'Unlock' a non-lock value")
   in
   loop ()
 
@@ -1110,6 +1182,7 @@ let schedule_record (state : state) (program : program)
                     | VList _ -> failwith "Type error VList!"
                     | VOption _ -> failwith "Type error VOption!"
                     | VFuture _ -> failwith "Type error VFuture!"
+                    | VLock _ -> failwith "Type error VLock!"
                     | VUnit -> failwith "Type error VUnit!"
                     | VTuple _ -> failwith "Type error VTuple!"
                   in
@@ -1117,39 +1190,45 @@ let schedule_record (state : state) (program : program)
                   let dest_node = node_id in
                   let should_execute = ref true in
 
-                  if
-                    randomly_drop_msgs
-                    &&
-                    (Random.self_init ();
-                     Random.float 1.0 < 0.3)
-                  then should_execute := false;
-                  if
-                    cut_tail_from_mid
-                    && ((src_node = 2 && dest_node = 1)
-                       || (dest_node = 2 && src_node = 1))
-                  then should_execute := false;
-                  if sever_all_but_mid then
-                    if dest_node = 2 && not (src_node = 1) then
-                      should_execute := false
-                    else if src_node = 2 && not (dest_node = 1) then
-                      should_execute := false;
-                  if
-                    List.mem src_node partition_away_nodes
-                    || List.mem dest_node partition_away_nodes
-                  then should_execute := false;
-                  if randomly_delay_msgs then
+                  (* Only apply fault injection to non-local calls *)
+                  if src_node <> dest_node then (
                     if
-                      Random.self_init ();
-                      Random.float 1.0 < r.x
-                    then (
-                      r.x <- r.f r.x;
-                      should_execute := false);
+                      randomly_drop_msgs
+                      &&
+                      (Random.self_init ();
+                       Random.float 1.0 < 0.3)
+                    then should_execute := false;
+
+                    if
+                      cut_tail_from_mid
+                      && ((src_node = 2 && dest_node = 1)
+                         || (dest_node = 2 && src_node = 1))
+                    then should_execute := false;
+
+                    if sever_all_but_mid then
+                      if dest_node = 2 && not (src_node = 1) then
+                        should_execute := false
+                      else if src_node = 2 && not (dest_node = 1) then
+                        should_execute := false;
+
+                    if
+                      List.mem src_node partition_away_nodes
+                      || List.mem dest_node partition_away_nodes
+                    then should_execute := false;
+
+                    if randomly_delay_msgs then
+                      if
+                        Random.self_init ();
+                        Random.float 1.0 < r.x
+                      then (
+                        r.x <- r.f r.x;
+                        should_execute := false));
+
                   if !should_execute then exec state program r
               | _ -> exec state program r)
           | _ -> exec state program r)
         else pick (n - 1) (r :: before) rs
   in
-  (* let idx = 0 in *)
   let idx =
     Random.self_init ();
     Random.int (List.length state.records)

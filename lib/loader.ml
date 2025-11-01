@@ -16,6 +16,7 @@ let rec expr_of_yojson json : expr =
   (* Handle Serde's default for unit variants *)
   | `String "EUnit" -> EUnit
   | `String "ENil" -> ENil
+  | `String "ECreatePromise" -> ECreatePromise
   (* Handle adjacently tagged variants*)
   | `Assoc [ (key, value) ] -> (
       match key with
@@ -137,6 +138,7 @@ let rec expr_of_yojson json : expr =
           match to_list value with
           | [ e1; e2 ] -> ECoalesce (expr_of_yojson e1, expr_of_yojson e2)
           | _ -> failwith "ECoalesce expects 2 args")
+      | "ECreateFuture" -> ECreateFuture (expr_of_yojson value)
       | _ -> failwith ("Unknown expr key: " ^ key))
   (* Handle malformed JSON *)
   | _ ->
@@ -175,6 +177,10 @@ let instr_of_yojson json : instr =
       match to_list value with
       | [ l; r ] -> Copy (lhs_of_yojson l, expr_of_yojson r)
       | _ -> failwith "Instr::Copy expects 2 args")
+  | "Resolve" -> (
+      match to_list value with
+      | [ l; r ] -> Resolve (lhs_of_yojson l, expr_of_yojson r)
+      | _ -> failwith "Instr::Resolve expects 2 args")
   | _ -> failwith ("Unknown instr key: " ^ key)
 
 let label_of_yojson json : CFG.vertex label =
