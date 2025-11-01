@@ -17,6 +17,7 @@ let rec expr_of_yojson json : expr =
   | `String "EUnit" -> EUnit
   | `String "ENil" -> ENil
   | `String "ECreatePromise" -> ECreatePromise
+  | `String "ECreateLock" -> ECreateLock
   (* Handle adjacently tagged variants*)
   | `Assoc [ (key, value) ] -> (
       match key with
@@ -138,7 +139,6 @@ let rec expr_of_yojson json : expr =
           match to_list value with
           | [ e1; e2 ] -> ECoalesce (expr_of_yojson e1, expr_of_yojson e2)
           | _ -> failwith "ECoalesce expects 2 args")
-      | "ECreateFuture" -> ECreateFuture (expr_of_yojson value)
       | _ -> failwith ("Unknown expr key: " ^ key))
   (* Handle malformed JSON *)
   | _ ->
@@ -210,6 +210,14 @@ let label_of_yojson json : CFG.vertex label =
       | [ e; v ] -> Print (expr_of_yojson e, to_int v)
       | _ -> failwith "Label::Print expects 2 args")
   | "Break" -> Break (to_int value)
+  | "Lock" -> (
+      match to_list value with
+      | [ e; v ] -> Lock (expr_of_yojson e, to_int v)
+      | _ -> failwith "Label::Lock expects 2 args")
+  | "Unlock" -> (
+      match to_list value with
+      | [ e; v ] -> Unlock (expr_of_yojson e, to_int v)
+      | _ -> failwith "Label::Unlock expects 2 args")
   | _ -> failwith ("Unknown label key: " ^ key)
 
 let function_info_of_yojson json : function_info =

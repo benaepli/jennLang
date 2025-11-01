@@ -64,7 +64,6 @@ type expr =
   | EUnwrap of expr
   | ECoalesce of expr * expr
   | ECreatePromise
-  | ECreateFuture of expr
   | ECreateLock
 [@@deriving ord]
 
@@ -174,6 +173,89 @@ type value = Value.t =
   | VUnit
   | VTuple of value array
 
+(* Get a human-readable type name for error messages *)
+let type_name = function
+  | VInt _ -> "int"
+  | VBool _ -> "bool"
+  | VString _ -> "string"
+  | VMap _ -> "map"
+  | VList _ -> "list"
+  | VOption _ -> "option"
+  | VFuture _ -> "future"
+  | VLock _ -> "lock"
+  | VNode _ -> "node"
+  | VUnit -> "unit"
+  | VTuple _ -> "tuple"
+
+(* Helper functions to extract specific types with better error messages *)
+let expect_int v =
+  match v with
+  | VInt i -> i
+  | _ ->
+      failwith (Printf.sprintf "Type error: expected int, got %s" (type_name v))
+
+let expect_bool v =
+  match v with
+  | VBool b -> b
+  | _ ->
+      failwith
+        (Printf.sprintf "Type error: expected bool, got %s" (type_name v))
+
+let expect_node v =
+  match v with
+  | VNode n | VInt n -> n
+  | _ ->
+      failwith
+        (Printf.sprintf "Type error: expected node/int, got %s" (type_name v))
+
+let expect_map v =
+  match v with
+  | VMap m -> m
+  | _ ->
+      failwith (Printf.sprintf "Type error: expected map, got %s" (type_name v))
+
+let expect_list v =
+  match v with
+  | VList l -> l
+  | _ ->
+      failwith
+        (Printf.sprintf "Type error: expected list, got %s" (type_name v))
+
+let expect_future v =
+  match v with
+  | VFuture f -> f
+  | _ ->
+      failwith
+        (Printf.sprintf "Type error: expected future, got %s" (type_name v))
+
+let expect_lock v =
+  match v with
+  | VLock l -> l
+  | _ ->
+      failwith
+        (Printf.sprintf "Type error: expected lock, got %s" (type_name v))
+
+let expect_tuple v =
+  match v with
+  | VTuple arr -> arr
+  | _ ->
+      failwith
+        (Printf.sprintf "Type error: expected tuple, got %s" (type_name v))
+
+let expect_option v =
+  match v with
+  | VOption o -> o
+  | _ ->
+      failwith
+        (Printf.sprintf "Type error: expected option, got %s" (type_name v))
+
+let expect_string v =
+  match v with
+  | VString s -> s
+  | _ ->
+      failwith
+        (Printf.sprintf "Type error: expected string, got %s" (type_name v))
+
 (* Run-time value of a left-hand-side *)
 type lvalue =
   | LVVar of string
@@ -272,7 +354,6 @@ let rec to_string_expr (e : expr) : string =
   | ECoalesce (e1, e2) ->
       "ECoalesce(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
   | ECreatePromise -> "ECreatePromise"
-  | ECreateFuture e -> "ECreateFuture(" ^ to_string_expr e ^ ")"
   | ECreateLock -> "ECreateLock"
 
 let to_string_lhs (l : lhs) : string =
@@ -383,8 +464,8 @@ type record = {
   node : int;
   continuation : value -> unit;
       (* Called when activation record returns
-                                    For RPCs, this writes to the associate future;
-                                    For client operations it appends to the history 
+                                For RPCs, this writes to the associate future;
+                                For client operations it appends to the history 
 *)
   env : value Env.t;
   id : int;
@@ -458,10 +539,12 @@ let rec eval (env : record_env) (expr : expr) : value =
               | VInt i | VNode i ->
                   if i < 0 || i >= List.length !l then (
                     Printf.printf "idx %d, len %d\n" i (List.length !l);
-
                     failwith "idx out of range of VList")
                   else List.nth !l i
-              | _ -> failwith "Cannot index into a list with non-integer"))
+              | other ->
+                  failwith
+                    (Printf.sprintf "Cannot index into a list with %s"
+                       (type_name other))))
       | VString s -> (
           match load s env with
           | VMap map -> ValueMap.find map (eval env k)
@@ -469,102 +552,52 @@ let rec eval (env : record_env) (expr : expr) : value =
               failwith
                 "EFind eval fail: cannot index into anything else but map with \
                  string")
-      | VBool _ ->
-          Printf.printf "Collection %s is bool, cannot index into using %s\n"
-            (to_string_expr c) (to_string_expr k);
-          failwith "EFind eval fail: collection is neither map nor string"
-      | VInt _ ->
-          Printf.printf "Collection %s is int, cannot index into using %s\n"
-            (to_string_expr c) (to_string_expr k);
-          failwith "EFind eval fail: collection is neither map nor string"
-      | VFuture _ ->
-          Printf.printf "Collection %s is future, cannot index into using %s\n"
-            (to_string_expr c) (to_string_expr k);
-          failwith "EFind eval fail: collection is neither map nor string"
-      | VLock _ ->
-          Printf.printf "Collection %s is lock, cannot index into using %s\n"
-            (to_string_expr c) (to_string_expr k);
-          failwith "EFind eval fail: collection is neither map nor string"
-      | VNode _ ->
-          Printf.printf "Collection %s is node, cannot index into using %s\n"
-            (to_string_expr c) (to_string_expr k);
-          failwith "EFind eval fail: collection is neither map nor string"
-      | VOption _ ->
-          Printf.printf "Collection %s is option, cannot index into using %s\n"
-            (to_string_expr c) (to_string_expr k);
-          failwith "EFind eval fail: collection is neither map nor string"
-      | VUnit ->
-          Printf.printf "Collection %s is unit, cannot index into using %s\n"
-            (to_string_expr c) (to_string_expr k);
-          failwith "EFind eval fail: collection is neither map nor string"
-      | VTuple _ ->
-          Printf.printf "Collection %s is tuple, cannot index into using %s\n"
-            (to_string_expr c) (to_string_expr k);
-          failwith "EFind eval fail: collection is neither map nor string")
+      | other ->
+          Printf.printf "Collection %s is %s, cannot index into using %s\n"
+            (to_string_expr c) (type_name other) (to_string_expr k);
+          failwith
+            (Printf.sprintf "EFind eval fail: cannot index into %s"
+               (type_name other)))
   | ENot e -> (
       match eval env e with
       | VBool b -> VBool (not b)
-      | VList _ -> failwith "Cannot negate a list"
-      | VInt _ -> failwith "Cannot negate an int"
-      | VString _ -> failwith "Cannot negate a string"
-      | VNode _ -> failwith "Cannot negate a node"
-      | VMap _ -> failwith "Cannot negate a map"
-      | VOption _ -> failwith "Cannot negate an option"
-      | _ -> failwith "ENot eval fail")
-  | EAnd (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VBool b1, VBool b2 -> VBool (b1 && b2)
-      | _ -> failwith "EAnd eval fail")
-  | EOr (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VBool b1, VBool b2 -> VBool (b1 || b2)
-      | _ -> failwith "EOr eval fail")
+      | other -> failwith (Printf.sprintf "Cannot negate %s" (type_name other)))
+  | EAnd (e1, e2) ->
+      VBool (expect_bool (eval env e1) && expect_bool (eval env e2))
+  | EOr (e1, e2) ->
+      VBool (expect_bool (eval env e1) || expect_bool (eval env e2))
   | EEqualsEquals (e1, e2) -> (
       match (eval env e1, eval env e2) with
+      (* Same type comparisons *)
       | VInt i1, VInt i2 -> VBool (i1 = i2)
       | VBool b1, VBool b2 -> VBool (b1 = b2)
       | VString s1, VString s2 -> VBool (s1 = s2)
       | VNode n1, VNode n2 -> VBool (n1 = n2)
-      | VNode n, VInt i -> VBool (n = i)
-      | VInt i, VNode n -> VBool (i = n)
       | VUnit, VUnit -> VBool true
       | VOption o1, VOption o2 -> VBool (o1 = o2)
-      | VMap _, _ -> failwith "EEqualsEquals fails with map"
-      | VFuture _, _ -> failwith "EEqualsEquals fails with VFuture"
-      | VLock _, _ -> failwith "EEqualsEquals fails with VLock"
+      | VTuple a1, VTuple a2 ->
+          VBool
+            (try Array.for_all2 ( = ) a1 a2 with Invalid_argument _ -> false)
       | VList l1, VList l2 ->
-          let rec list_eq (l1 : value list) (l2 : value list) : bool =
+          let rec list_eq l1 l2 =
             match (l1, l2) with
             | [], [] -> true
-            | [], _ -> false
-            | _, [] -> false
+            | [], _ | _, [] -> false
             | hd1 :: tl1, hd2 :: tl2 ->
                 if hd1 = hd2 then list_eq tl1 tl2 else false
           in
           VBool (list_eq !l1 !l2)
-      | VList _, _ -> failwith "EEqualsEquals fails with VList, not VList"
-      | VOption _, _ -> failwith "EEqualsEquals fails with option"
-      | VInt i, other -> (
-          match other with
-          | VInt _ -> failwith "EEqualsEquals eval fail VInt, VInt"
-          | VBool _ -> failwith "EEqualsEquals eval fail VInt, VBool"
-          | VString _ -> failwith "EEqualsEquals eval fail VInt, VString"
-          | VNode n ->
-              Printf.printf "VInt %d, VNode %d\n" i n;
-              failwith "EEqualsEquals eval fail VInt, VNode"
-          | VMap _ -> failwith "EEqualsEquals eval fail VInt, VMap"
-          | VFuture _ -> failwith "EEqualsEquals eval fail VInt, VFuture"
-          | VList _ -> failwith "EEqualsEquals eval fail VInt, VList"
-          | VOption _ -> VBool false
-          | VUnit -> VBool false
-          | VTuple _ -> VBool false
-          | VLock _ -> failwith "EEqualsEquals eval fail VInt, VLock")
-      | VBool _, _ -> failwith "EEqualsEquals eval fail VBool"
-      | VString _, _ -> failwith "EEqualsEquals eval fail VString"
-      | VNode _, _ -> failwith "EEqualsEquals eval fail VNode"
-      | VUnit, _ | _, VUnit -> VBool false
-      | _, VOption _ -> VBool false
-      | VTuple _, _ -> VBool false)
+      (* Special case: VNode and VInt are interchangeable *)
+      | VNode n, VInt i | VInt i, VNode n -> VBool (n = i)
+      (* Reference types that cannot be meaningfully compared *)
+      | VMap _, _ | _, VMap _ ->
+          failwith "Cannot compare maps for equality (reference type)"
+      | VFuture _, _ | _, VFuture _ ->
+          failwith "Cannot compare futures for equality (reference type)"
+      | VLock _, _ | _, VLock _ ->
+          failwith "Cannot compare locks for equality (reference type)"
+      (* Different types return false *)
+      | _ -> VBool false)
   | EMap kvp ->
       let rec makemap (kvpairs : (expr * expr) list) : value ValueMap.t =
         match kvpairs with
@@ -582,112 +615,77 @@ let rec eval (env : record_env) (expr : expr) : value =
         | e :: rest -> ref (eval env e :: !(makelist rest))
       in
       VList (makelist exprs)
-  | EListPrepend (item, ls) -> (
-      match (eval env item, eval env ls) with
-      | v, VList l -> VList (ref (v :: !l))
-      | _ -> failwith "EListPrepend eval fail")
-  | EListAppend (ls, item) -> (
-      match (eval env ls, eval env item) with
-      | VList l, v -> VList (ref (!l @ [ v ]))
-      | _ -> failwith "EListAppend eval fail")
+  | EListPrepend (item, ls) ->
+      let v = eval env item in
+      let l = expect_list (eval env ls) in
+      VList (ref (v :: !l))
+  | EListAppend (ls, item) ->
+      let l = expect_list (eval env ls) in
+      let v = eval env item in
+      VList (ref (!l @ [ v ]))
   | EListSubsequence (ls, start_idx, end_idx) -> (
-      match (eval env ls, eval env start_idx, eval env end_idx) with
-      | VList l, VInt start_idx, VInt end_idx -> (
-          match !l with
-          | [] -> failwith "EListSubsequence eval fail on empty list"
-          | _ ->
-              if
-                start_idx < 0 || end_idx < 0
-                || start_idx >= List.length !l
-                || end_idx > List.length !l
-              then failwith "EListSubsequence eval fail on out of bounds"
-              else
-                let rec subseq (lst : value list) (start_idx : int)
-                    (end_idx : int) : value list =
-                  match lst with
-                  | [] -> []
-                  | hd :: tl ->
-                      if start_idx = 0 then
-                        if end_idx = 0 then []
-                        else hd :: subseq tl start_idx (end_idx - 1)
-                      else subseq tl (start_idx - 1) (end_idx - 1)
-                in
-                VList (ref (subseq !l start_idx end_idx)))
-      | _ -> failwith "EListSubsequence eval fail")
+      let l = expect_list (eval env ls) in
+      let start_idx = expect_int (eval env start_idx) in
+      let end_idx = expect_int (eval env end_idx) in
+      match !l with
+      | [] -> failwith "EListSubsequence eval fail on empty list"
+      | _ ->
+          if
+            start_idx < 0 || end_idx < 0
+            || start_idx >= List.length !l
+            || end_idx > List.length !l
+          then failwith "EListSubsequence eval fail on out of bounds"
+          else
+            let rec subseq (lst : value list) (start_idx : int) (end_idx : int)
+                : value list =
+              match lst with
+              | [] -> []
+              | hd :: tl ->
+                  if start_idx = 0 then
+                    if end_idx = 0 then []
+                    else hd :: subseq tl start_idx (end_idx - 1)
+                  else subseq tl (start_idx - 1) (end_idx - 1)
+            in
+            VList (ref (subseq !l start_idx end_idx)))
   | EString s -> VString s
-  | ELessThan (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VInt i1, VInt i2 -> VBool (i1 < i2)
-      | _ -> failwith "ELessThan eval fail")
-  | ELessThanEquals (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VInt i1, VInt i2 -> VBool (i1 <= i2)
-      | _ -> failwith "ELessThanEquals eval fail")
-  | EGreaterThan (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VInt i1, VInt i2 -> VBool (i1 > i2)
-      | _ -> failwith "EGreaterThan eval fail")
-  | EGreaterThanEquals (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VInt i1, VInt i2 -> VBool (i1 >= i2)
-      | _ -> failwith "EGreaterThanEquals eval fail")
-  | EKeyExists (key, mp) -> (
-      match (eval env key, eval env mp) with
-      | k, VMap m -> VBool (ValueMap.mem m k)
-      | _ ->
-          Printf.printf "%s is not a map, key %s may not exist\n"
-            (to_string_expr mp) (to_string_expr key);
-          failwith "EKeyExists eval fail")
-  | EMapErase (key, mp) -> (
-      match (eval env key, eval env mp) with
-      | k, VMap m ->
-          ValueMap.remove m k;
-          VMap m
-      | _ ->
-          Printf.printf "%s is not a map, cannot erase key %s\n"
-            (to_string_expr mp) (to_string_expr key);
-          failwith "EMapErase eval fail")
+  | ELessThan (e1, e2) ->
+      VBool (expect_int (eval env e1) < expect_int (eval env e2))
+  | ELessThanEquals (e1, e2) ->
+      VBool (expect_int (eval env e1) <= expect_int (eval env e2))
+  | EGreaterThan (e1, e2) ->
+      VBool (expect_int (eval env e1) > expect_int (eval env e2))
+  | EGreaterThanEquals (e1, e2) ->
+      VBool (expect_int (eval env e1) >= expect_int (eval env e2))
+  | EKeyExists (key, mp) ->
+      let k = eval env key in
+      let m = expect_map (eval env mp) in
+      VBool (ValueMap.mem m k)
+  | EMapErase (key, mp) ->
+      let k = eval env key in
+      let m = expect_map (eval env mp) in
+      ValueMap.remove m k;
+      VMap m
   | EListLen e -> (
       match eval env e with
       | VList l -> VInt (List.length !l)
       | VMap m -> VInt (ValueMap.length m)
-      | _ -> failwith "EListLen eval fail on non-collection")
+      | other ->
+          failwith
+            (Printf.sprintf "EListLen eval fail on %s (not a collection)"
+               (type_name other)))
   | EListAccess (ls, idx) -> (
-      match eval env ls with
-      | VList l -> (
-          match !l with
-          | [] -> failwith "EListAccess eval fail on empty list"
-          | _ ->
-              if List.length !l <= idx || idx < 0 then
-                failwith "idx out of range in EListAccess"
-              else List.nth !l idx)
-      | _ -> failwith "Can't index into something that isn't a list")
-  | EPlus (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VInt i1, VInt i2 -> VInt (i1 + i2)
-      | _, VBool _ ->
-          Printf.printf "e1 %s, e2 %s\n" (to_string_expr e1) (to_string_expr e2);
-          failwith "EPlus eval fail _, VBool"
-      | VBool _, _ ->
-          Printf.printf "e1 %s, e2 %s\n" (to_string_expr e1) (to_string_expr e2);
-          failwith "EPlus eval fail VBool _"
-      | _ -> failwith "EPlus eval fail")
-  | EMinus (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VInt i1, VInt i2 -> VInt (i1 - i2)
-      | _ -> failwith "EMinus eval fail")
-  | ETimes (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VInt i1, VInt i2 -> VInt (i1 * i2)
-      | _ -> failwith "ETimes eval fail")
-  | EDiv (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VInt i1, VInt i2 -> VInt (i1 / i2)
-      | _ -> failwith "EDiv eval fail")
-  | EMod (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VInt i1, VInt i2 -> VInt (i1 mod i2)
-      | _ -> failwith "EMod eval fail")
+      let l = expect_list (eval env ls) in
+      match !l with
+      | [] -> failwith "EListAccess eval fail on empty list"
+      | _ ->
+          if List.length !l <= idx || idx < 0 then
+            failwith "idx out of range in EListAccess"
+          else List.nth !l idx)
+  | EPlus (e1, e2) -> VInt (expect_int (eval env e1) + expect_int (eval env e2))
+  | EMinus (e1, e2) -> VInt (expect_int (eval env e1) - expect_int (eval env e2))
+  | ETimes (e1, e2) -> VInt (expect_int (eval env e1) * expect_int (eval env e2))
+  | EDiv (e1, e2) -> VInt (expect_int (eval env e1) / expect_int (eval env e2))
+  | EMod (e1, e2) -> VInt (expect_int (eval env e1) mod expect_int (eval env e2))
   | EPollForResps (e1, _) -> (
       match eval env e1 with
       | VList list_ref -> (
@@ -735,7 +733,10 @@ else poll_for_response tl *)
                       "Polling for response that isn't a future or bool in map")
           in
           VInt (poll_for_response lst)
-      | _ -> failwith "Polling for response on non-collection")
+      | other ->
+          failwith
+            (Printf.sprintf "Polling for response on %s (not a collection)"
+               (type_name other)))
   | EPollForAnyResp rhs -> (
       match eval env rhs with
       | VList list_ref -> (
@@ -778,57 +779,49 @@ else poll_for_response tl *)
                       "Polling for response that isn't a future or bool in map")
           in
           VBool (poll_for_response folded_map)
-      | _ -> failwith "Polling for response on non-collection")
-  | ENextResp e -> (
-      match eval env e with
-      | VMap m ->
-          let folded_map = ValueMap.fold (fun k v acc -> (k, v) :: acc) m [] in
-          let rec nxt_resp (lst : (value * value) list) : value =
-            match lst with
-            | [] -> failwith "No responses \nin map"
-            | hd :: tl -> (
-                let key, value = hd in
-                match value with
-                | VFuture fut -> (
-                    match !fut with
-                    | Some v ->
-                        ValueMap.replace m key (VFuture (ref None));
-                        v
-                    | None -> nxt_resp tl)
-                | _ -> failwith "ENextResp on non-future")
-          in
-          nxt_resp folded_map
-      | _ -> failwith "ENextResp on non-collection")
-  | EMin (e1, e2) -> (
-      match (eval env e1, eval env e2) with
-      | VInt i1, VInt i2 -> VInt (min i1 i2)
-      | _ -> failwith "EMin eval fail")
+      | other ->
+          failwith
+            (Printf.sprintf "Polling for response on %s (not a collection)"
+               (type_name other)))
+  | ENextResp e ->
+      let m = expect_map (eval env e) in
+      let folded_map = ValueMap.fold (fun k v acc -> (k, v) :: acc) m [] in
+      let rec nxt_resp (lst : (value * value) list) : value =
+        match lst with
+        | [] -> failwith "No responses in map"
+        | hd :: tl -> (
+            let key, value = hd in
+            match value with
+            | VFuture fut -> (
+                match !fut with
+                | Some v ->
+                    ValueMap.replace m key (VFuture (ref None));
+                    v
+                | None -> nxt_resp tl)
+            | _ -> failwith "ENextResp on non-future")
+      in
+      nxt_resp folded_map
+  | EMin (e1, e2) ->
+      VInt (min (expect_int (eval env e1)) (expect_int (eval env e2)))
   | EUnit -> VUnit
   | ENil -> VOption None (* nil literal evaluates to VOption None *)
   | ETuple exprs -> VTuple (Array.of_list (List.map (eval env) exprs))
   | ETupleAccess (e_tuple, idx) -> (
-      match eval env e_tuple with
-      | VTuple arr -> (
-          try arr.(idx)
-          with Invalid_argument _ ->
-            failwith
-              ("Runtime error: Tuple index " ^ string_of_int idx
-             ^ " out of bounds"))
-      | _ -> failwith "Type error: Attempted tuple access on non-tuple")
+      let arr = expect_tuple (eval env e_tuple) in
+      try arr.(idx)
+      with Invalid_argument _ ->
+        failwith
+          ("Runtime error: Tuple index " ^ string_of_int idx ^ " out of bounds")
+      )
   | EUnwrap e -> (
-      match eval env e with
-      | VOption (Some v) -> v
-      | VOption None -> failwith "Runtime error: Attempted to unwrap nil"
-      | v ->
-          Printf.printf "Unwrap on: %s\n" (to_string_value v);
-          failwith "Type error: Attempted to unwrap non-optional")
+      match expect_option (eval env e) with
+      | Some v -> v
+      | None -> failwith "Runtime error: Attempted to unwrap nil")
   | ECoalesce (e_opt, e_default) -> (
-      match eval env e_opt with
-      | VOption (Some v) -> v
-      | VOption None -> eval env e_default
-      | _ -> failwith "Type error: Coalesce on non-optional")
+      match expect_option (eval env e_opt) with
+      | Some v -> v
+      | None -> eval env e_default)
   | ECreatePromise -> VFuture (ref None)
-  | ECreateFuture e -> eval env e
   | ECreateLock -> VLock (ref false)
 
 let eval_lhs (env : record_env) (lhs : lhs) : lvalue =
@@ -838,7 +831,9 @@ let eval_lhs (env : record_env) (lhs : lhs) : lvalue =
       match eval env collection with
       | VMap map -> LVAccess (eval env exp, map)
       | VList l -> LVAccessList (eval env exp, l)
-      | _ -> failwith "LAccess can't index into non-collection types")
+      | other ->
+          failwith
+            (Printf.sprintf "LAccess can't index into %s" (type_name other)))
   | LTuple strs -> LVTuple strs
 
 let store (lhs : lhs) (vl : value) (env : record_env) : unit =
@@ -856,9 +851,11 @@ let store (lhs : lhs) (vl : value) (env : record_env) : unit =
           else
             let lst = !ref_l in
             ref_l := List.mapi (fun j x -> if j = i then vl else x) lst
-      | _ ->
+      | other ->
           Printf.printf "failed to index into %s\n" (to_string_lhs lhs);
-          failwith "Can't index into a list with non-integer")
+          failwith
+            (Printf.sprintf "Can't index into a list with %s" (type_name other))
+      )
   | LVTuple _ -> failwith "how to store LVTuples?"
 
 exception Halt
@@ -873,7 +870,10 @@ let copy (lhs : lhs) (vl : value) (env : record_env) : unit =
       | VList l ->
           let temp = ref (List.map (fun x -> x) !l) in
           Env.replace env.local_env var (VList temp)
-      | _ -> failwith "no copying non-collections")
+      | other ->
+          failwith
+            (Printf.sprintf "Cannot copy %s (only collections can be copied)"
+               (type_name other)))
   | _ -> failwith "copying only to local_copy"
 
 let function_info name program =
@@ -881,6 +881,36 @@ let function_info name program =
   with Not_found ->
     Printf.printf "function %s is not defined\n" name;
     failwith "Function not found"
+
+(* Helper to create RPC record - factored out to reduce duplication *)
+let create_rpc_record node_id func actuals env program record =
+  let { entry; formals; locals; _ } = function_info func program in
+  let new_env = Env.create 1024 in
+  (try
+     List.iter2
+       (fun formal actual -> Env.add new_env formal (eval env actual))
+       formals actuals
+   with Invalid_argument _ ->
+     Printf.printf
+       "Func %s mismatches def and caller args\n\
+       \                    formals: %s\n\n\
+       \                               actuals: %s\n"
+       func
+       (String.concat ", " formals)
+       (String.concat ", \n" (List.map to_string_expr actuals));
+     failwith "Mismatched arguments in function call");
+  List.iter
+    (fun (var_name, expr) -> Env.add new_env var_name (eval env expr))
+    locals;
+  {
+    node = node_id;
+    pc = entry;
+    continuation = (fun value -> ref None := Some value);
+    env = new_env;
+    id = record.id;
+    x = record.x;
+    f = record.f;
+  }
 
 (* Execute record until pause/return.  Invariant: record does *not* belong to
    state.records *)
@@ -896,7 +926,6 @@ let exec (state : state) (program : program) (record : record) =
             match eval env node with
             | VNode node_id | VInt node_id ->
                 let new_future = ref None in
-
                 let { entry; formals; locals; _ } =
                   function_info func program
                 in
@@ -932,14 +961,6 @@ let exec (state : state) (program : program) (record : record) =
                 in
                 store lhs (VFuture new_future) env;
                 state.records <- new_record :: state.records
-            | VBool _ -> failwith "Type error bool"
-            | VMap _ -> failwith "Type error map"
-            | VList _ -> failwith "Type error list"
-            | VOption _ -> failwith "Type error option"
-            | VFuture _ -> failwith "Type error future"
-            | VLock _ -> failwith "Type error lock"
-            | VUnit -> failwith "Type error unit"
-            | VTuple _ -> failwith "Type error tuple"
             | VString role -> (
                 match load role env with
                 | VNode node_id ->
@@ -965,7 +986,15 @@ let exec (state : state) (program : program) (record : record) =
 
                     store lhs (VFuture new_future) env;
                     state.records <- new_record :: state.records
-                | _ -> failwith "Type error idk what you are anymore"))
+                | other ->
+                    failwith
+                      (Printf.sprintf
+                         "Type error: role string resolved to %s, expected node"
+                         (type_name other)))
+            | other ->
+                failwith
+                  (Printf.sprintf "Type error: expected node for RPC, got %s"
+                     (type_name other)))
         | Assign (lhs, rhs) -> store lhs (eval env rhs) env
         | Copy (lhs, rhs) -> copy lhs (eval env rhs) env
         | Resolve (lhs, rhs) -> (
@@ -986,25 +1015,20 @@ let exec (state : state) (program : program) (record : record) =
                   failwith
                     ("Runtime error: Promise at " ^ to_string_lhs lhs
                    ^ " already resolved")
-            | _ ->
+            | other ->
                 failwith
-                  ("Type error: Attempted to resolve non-promise at "
-                 ^ to_string_lhs lhs)));
+                  (Printf.sprintf
+                     "Type error: Attempted to resolve %s (not a promise) at %s"
+                     (type_name other) (to_string_lhs lhs))));
         loop ()
     | Cond (cond, bthen, belse) ->
         (match eval env cond with
         | VBool true -> record.pc <- bthen
         | VBool false -> record.pc <- belse
-        | VInt _ -> failwith "Type error int"
-        | VFuture _ -> failwith "Type error future"
-        | VLock _ -> failwith "Type error lock"
-        | VMap _ -> failwith "Type error map"
-        | VList _ -> failwith "Type error list"
-        | VOption _ -> failwith "Type error option"
-        | VString _ -> failwith "Type error string"
-        | VNode _ -> failwith "Type error node"
-        | VUnit -> failwith "Type error unit"
-        | VTuple _ -> failwith "Type error tuple");
+        | other ->
+            failwith
+              (Printf.sprintf "Type error in condition: expected bool, got %s"
+                 (type_name other)));
         loop ()
     | Await (lhs, expr, next) -> (
         match eval env expr with
@@ -1025,15 +1049,11 @@ do any work. *)
               record.pc <- next;
               loop ())
             else state.records <- record :: state.records
-        | VLock _ -> failwith "Type error lock"
-        | VInt _ -> failwith "Type error int"
-        | VMap _ -> failwith "Type error map"
-        | VList _ -> failwith "Type error list"
-        | VOption _ -> failwith "Type error option"
-        | VString _ -> failwith "Type error string"
-        | VNode _ -> failwith "Type error node"
-        | VUnit -> failwith "Type \nerror unit"
-        | VTuple _ -> failwith "Type error tuple")
+        | other ->
+            failwith
+              (Printf.sprintf
+                 "Type error in await: expected future or bool, got %s"
+                 (type_name other)))
     | Return expr -> record.continuation (eval env expr)
     | Pause next ->
         record.pc <- next;
@@ -1102,55 +1122,43 @@ do any work. *)
                   Env.add env.local_env var (Option.get removed_item);
                   record.pc <- body;
                   loop ()
-              | LAccess _ ->
+              | _ ->
+                  Printf.printf "failed to iterate list with lhs %s\n"
+                    (to_string_lhs lhs);
                   failwith
                     "Cannot iterate through list with anything other than a \
-                     variable LAccess"
-              | LTuple _ ->
-                  failwith
-                    "Cannot iterate through list with anything other than a \
-                     variable LTuple")
-        | VInt _ -> failwith "Type error VInt"
-        | VBool _ -> failwith "Type error VBool"
-        | VString _ -> failwith "Type error VString"
-        | VNode _ -> failwith "Type error VNode"
-        | VOption _ -> failwith "Type error VOption"
-        | VFuture _ -> failwith "Type error VFuture"
-        | VLock _ -> failwith "Type error VLock"
-        | VUnit -> failwith "Type error VUnit"
-        | VTuple _ -> failwith "Type error VTuple")
+                     single variable")
+        | other ->
+            Printf.printf "failed to iterate collection: %s\n"
+              (to_string_expr expr);
+            failwith
+              (Printf.sprintf "ForLoopIn on %s (not a collection)"
+                 (type_name other)))
     | Print (expr, next) ->
-        let v = eval env expr in
-        Printf.printf "%s" (to_string_value v);
+        Printf.printf "%s\n" (to_string_value (eval env expr));
         record.pc <- next;
         loop ()
     | Break _ -> raise Halt
-    | Lock (lock_expr, next) -> (
-        match eval env lock_expr with
-        | VLock lock_ref ->
-            if !lock_ref = false then (
-              (* Lock is free, acquire it *)
-              lock_ref := true;
-              record.pc <- next;
-              loop ())
-            else
-              (* Lock is held, re-queue the record to wait *)
-              (* This is the same behavior as Await on an unresolved VFuture  *)
-              state.records <- record :: state.records
-        | _ -> failwith "Type error: Attempted to 'Lock' a non-lock value")
-    | Unlock (lock_expr, next) -> (
-        match eval env lock_expr with
-        | VLock lock_ref ->
-            if !lock_ref = true then (
-              (* Lock is held, release it *)
-              lock_ref := false;
-              record.pc <- next;
-              loop ())
-            else
-              (* This is a double unlock, which is a logic error *)
-              failwith
-                "Runtime error: Attempted to 'Unlock' an already-unlocked lock"
-        | _ -> failwith "Type error: Attempted to 'Unlock' a non-lock value")
+    | Lock (lock_expr, next) ->
+        let lock_ref = expect_lock (eval env lock_expr) in
+        if !lock_ref = false then (
+          (* Lock is free, acquire it *)
+          lock_ref := true;
+          record.pc <- next;
+          loop ())
+        else
+          (* Lock is held, re-queue the record to wait *)
+          state.records <- record :: state.records
+    | Unlock (lock_expr, next) ->
+        let lock_ref = expect_lock (eval env lock_expr) in
+        if !lock_ref = true then (
+          (* Lock is held, release it *)
+          lock_ref := false;
+          record.pc <- next;
+          loop ())
+        else
+          failwith
+            "Runtime error: Attempted to 'Unlock' an already-unlocked lock"
   in
   loop ()
 
@@ -1173,19 +1181,7 @@ let schedule_record (state : state) (program : program)
           | Instr (i, _) -> (
               match i with
               | Async (_, node, _, _) ->
-                  let node_id =
-                    match eval env node with
-                    | VNode n_id | VInt n_id -> n_id
-                    | VBool _ -> failwith "Type error VBool!"
-                    | VString _ -> failwith "Type error VString!"
-                    | VMap _ -> failwith "Type error VMap!"
-                    | VList _ -> failwith "Type error VList!"
-                    | VOption _ -> failwith "Type error VOption!"
-                    | VFuture _ -> failwith "Type error VFuture!"
-                    | VLock _ -> failwith "Type error VLock!"
-                    | VUnit -> failwith "Type error VUnit!"
-                    | VTuple _ -> failwith "Type error VTuple!"
-                  in
+                  let node_id = expect_node (eval env node) in
                   let src_node = r.node in
                   let dest_node = node_id in
                   let should_execute = ref true in
@@ -1233,133 +1229,77 @@ let schedule_record (state : state) (program : program)
     Random.self_init ();
     Random.int (List.length state.records)
   in
-  (* let chosen_record = List.nth state.records idx in *)
-  (* let vert = chosen_record.pc in  *)
-  let chosen_idx =
-    idx
-    (* let chosen_idx =  *)
-    (* match (CFG.label program.cfg vert) with *)
-    (* | Pause _ *)
-    (* | Await (_, _, _) -> if (List.length state.records) == 1 then idx else 1 *)
-    (* | _ -> idx *)
-  in
+  let chosen_idx = idx in
   pick chosen_idx [] state.records
 
-(* Choose a client without a 
-pending operation, create a new activation record
+(* Helper function to schedule a thread *)
+let schedule_thread (state : state) (program : program) (func_name : string)
+    (actuals : value list) (unique_id : int) (free_threads : int list)
+    (update_free_threads : int list -> unit) : unit =
+  let rec pick n before after =
+    match after with
+    | [] -> raise Halt
+    | c :: cs ->
+        if n == 0 then (
+          let op = Env.find program.client_ops func_name in
+          let env = Env.create 1024 in
+          List.iter2
+            (fun formal actual -> Env.add env formal actual)
+            op.formals actuals;
+
+          let invocation =
+            {
+              client_id = c;
+              op_action = op.name;
+              kind = Invocation;
+              payload = actuals;
+              unique_id;
+            }
+          in
+          let continuation value =
+            (* After completing the operation, add response to the history and
+             allow thread to be scheduled again. *)
+            let response =
+              {
+                client_id = c;
+                op_action = op.name;
+                kind = Response;
+                payload = [ value ];
+                unique_id;
+              }
+            in
+            DA.add state.history response;
+            update_free_threads (c :: free_threads)
+          in
+          let record =
+            {
+              pc = op.entry;
+              node = c;
+              continuation;
+              env;
+              id = unique_id;
+              x = 0.4;
+              f = (fun x -> x /. 2.0);
+            }
+          in
+          update_free_threads (List.rev_append before cs);
+          DA.add state.history invocation;
+          state.records <- record :: state.records)
+        else pick (n - 1) (c :: before) cs
+  in
+  pick
+    (Random.self_init ();
+     Random.int (List.length free_threads))
+    [] free_threads
+
+(* Choose a client without a pending operation, create a new activation record
    to execute it, and append the invocation to the history *)
 let schedule_client (state : state) (program : program) (func_name : string)
     (actuals : value list) (unique_id : int) : unit =
-  let rec pick n before after =
-    match after with
-    | [] -> raise Halt
-    | c :: cs ->
-        if n == 0 then (
-          let op = Env.find program.client_ops func_name in
-          let env = Env.create 1024 in
-          List.iter2
-            (fun formal actual -> Env.add env formal actual)
-            op.formals actuals;
-
-          let invocation =
-            {
-              client_id = c;
-              op_action = op.name;
-              kind = Invocation;
-              payload = actuals;
-              unique_id;
-            }
-          in
-          let continuation value =
-            (* After completing the operation, add response to the history and
-             allow client to be scheduled again. *)
-            let response =
-              {
-                client_id = c;
-                op_action = op.name;
-                kind = Response;
-                payload = [ value ];
-                unique_id;
-              }
-            in
-            DA.add state.history response;
-            state.free_clients <- c :: state.free_clients
-          in
-          let record =
-            {
-              pc = op.entry;
-              node = c;
-              continuation;
-              env;
-              id = unique_id;
-              x = 0.4;
-              f = (fun x -> x /. 2.0);
-            }
-          in
-          state.free_clients <- List.rev_append before cs;
-          DA.add state.history invocation;
-          state.records <- record :: state.records)
-        else pick (n - 1) (c :: before) cs
-  in
-  pick
-    (Random.self_init ();
-     Random.int (List.length state.free_clients))
-    [] state.free_clients
+  schedule_thread state program func_name actuals unique_id state.free_clients
+    (fun threads -> state.free_clients <- threads)
 
 let schedule_sys_thread (state : state) (program : program) (func_name : string)
     (actuals : value list) (unique_id : int) : unit =
-  let rec pick n before after =
-    match after with
-    | [] -> raise Halt
-    | c :: cs ->
-        if n == 0 then (
-          let op = Env.find program.client_ops func_name in
-          let env = Env.create 1024 in
-          List.iter2
-            (fun formal actual -> Env.add env formal actual)
-            op.formals actuals;
-
-          let invocation =
-            {
-              client_id = c;
-              op_action = op.name;
-              kind = Invocation;
-              payload = actuals;
-              unique_id;
-            }
-          in
-          let continuation value =
-            (* After completing the operation, add response to the history and
-             allow client to be scheduled again. *)
-            let response =
-              {
-                client_id = c;
-                op_action = op.name;
-                kind = Response;
-                payload = [ value ];
-                unique_id;
-              }
-            in
-            DA.add state.history response;
-            state.free_sys_threads <- c :: state.free_sys_threads
-          in
-          let record =
-            {
-              pc = op.entry;
-              node = c;
-              continuation;
-              env;
-              id = unique_id;
-              x = 0.4;
-              f = (fun x -> x /. 2.0);
-            }
-          in
-          state.free_sys_threads <- List.rev_append before cs;
-          DA.add state.history invocation;
-          state.records <- record :: state.records)
-        else pick (n - 1) (c :: before) cs
-  in
-  pick
-    (Random.self_init ();
-     Random.int (List.length state.free_sys_threads))
-    [] state.free_sys_threads
+  schedule_thread state program func_name actuals unique_id
+    state.free_sys_threads (fun threads -> state.free_sys_threads <- threads)
