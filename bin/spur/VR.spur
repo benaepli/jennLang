@@ -73,7 +73,7 @@ role Node {
     func process_entry(op_n: int, msg: PrepareMsg) {
         op_number = op_n;
         log = append(log, LogEntry{ view: view_number, op: msg.request });
-        rpc_async_call(primary_of(view_number), PrepareOK(view_number, op_number, replicas[self]));
+        rpc_call(await primary_of(view_number), PrepareOK(view_number, op_number, replicas[self]));
 
         if (msg.commit_number > commit_number) {
             commit_number = msg.commit_number;
@@ -88,17 +88,8 @@ role Node {
             let next_op: int = op_number + 1;
             let msg: PrepareMsg = prepare_buffer[next_op];
             
-            process_entry(next_op, msg);
-            
-            // TODO: add remove from map to Spur.  
-            let new_buffer: map<int, PrepareMsg> = {};
-            
-            for ((key, value) in prepare_buffer) { 
-                if (key != next_op) {
-                    new_buffer[key] = prepare_buffer[key];
-                }
-            }
-            prepare_buffer = new_buffer;
+            process_entry(next_op, msg);  
+            erase(prepare_buffer, next_op);
         }
     }
 
@@ -120,19 +111,19 @@ role Node {
 
     // Handles a PrepareOK message from a backup.
     func PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
-        let current_primary: Node = primary_of(view_number);
+        let current_primary: Node = await primary_of(view_number);
         if (replicas[self] == current_primary and other_view == view_number) {
             if (!exists(prepare_ok_counts, other_op_number)) {
                 prepare_ok_counts[other_op_number] = 0;
             }
             prepare_ok_counts[other_op_number] = prepare_ok_counts[other_op_number] + 1;
 
-            let mid: int = f();
+            let mid: int = await f();
             if (prepare_ok_counts[other_op_number] >= mid and other_op_number > commit_number) {
                 commit_number = other_op_number;
                 for (let i: int = 0; i < len(replicas); i = i + 1) {
                     if (i != self) {
-                        rpc_async_call(replicas[i], Commit(view_number, commit_number));
+                        rpc_call(replicas[i], Commit(view_number, commit_number));
                     }
                 }
             }
@@ -175,7 +166,7 @@ role Node {
             enter_view_change(new_view);
             for (let i: int = 0; i < len(replicas); i = i + 1) {
                  if (i != self) {
-                    rpc_async_call(replicas[i], StartViewChange(view_number, replicas[self]));
+                    rpc_call(replicas[i], StartViewChange(view_number, replicas[self]));
                  }
             }
         } elseif (new_view == view_number and status == 1) {
@@ -183,15 +174,15 @@ role Node {
             let f_val: int = (len(replicas) - 1) / 2;
             let quorum: int = f_val + 1;
             if (start_view_change_count == quorum) {
-                let new_primary: Node = primary_of(view_number);
-                rpc_async_call(new_primary, DoViewChange(view_number, log, normal_view, op_number, commit_number));
+                let new_primary: Node = await primary_of(view_number);
+                rpc_call(new_primary, DoViewChange(view_number, log, normal_view, op_number, commit_number));
             }
         }
     }
 
     // Handles a DoViewChange message, sent to the new primary.
     func DoViewChange(new_view: int, sender_log: list<LogEntry>, sender_normal_view: int, sender_op_number: int, sender_commit_number: int) {
-        let current_primary: Node = primary_of(new_view);
+        let current_primary: Node = await primary_of(new_view);
         if (replicas[self] == current_primary and new_view == view_number) {
             do_view_change_count = do_view_change_count + 1;
             do_view_change_messages = append(do_view_change_messages, DoViewChangeMsg{
@@ -200,7 +191,7 @@ role Node {
                 op_number: sender_op_number,
                 commit_number: sender_commit_number
             });
-            let quorum: int = f() + 1;
+            let quorum: int = await f() + 1;
             if (do_view_change_count == quorum) {
                 let best_log: list<LogEntry> = log;
                 let best_normal_view: int = normal_view;
@@ -225,7 +216,7 @@ role Node {
 
                 enter_normal_mode(new_view, best_log, best_op_number, max_commit_number);
                 for (let i: int = 0; i < len(replicas); i = i + 1) {
-                    rpc_async_call(replicas[i], StartView(view_number, log, op_number, commit_number));
+                    rpc_call(replicas[i], StartView(view_number, log, op_number, commit_number));
                 }
             }
         }
@@ -235,10 +226,10 @@ role Node {
     func StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
         if (new_view >= view_number) {
             enter_normal_mode(new_view, new_log, new_op_number, new_commit_number);
-            let new_primary: Node = primary_of(view_number);
+            let new_primary: Node = await primary_of(view_number);
             if (replicas[self] != new_primary) {
                 for (let i: int = commit_number + 1; i <= op_number; i = i + 1) {
-                    rpc_async_call(new_primary, PrepareOK(view_number, i, replicas[self]));
+                    rpc_call(new_primary, PrepareOK(view_number, i, replicas[self]));
                 }
             }
         }
@@ -250,7 +241,7 @@ role Node {
 
     // Accepts a new command from a client.
     func NewEntry(cmd: Command) -> bool {
-        let current_primary: Node = primary_of(view_number);
+        let current_primary: Node = await primary_of(view_number);
         if (replicas[self] != current_primary) {
             return false;
         }
@@ -267,7 +258,7 @@ role Node {
 
         for (let i: int = 0; i < len(replicas); i = i + 1) {
             if (i != self) {
-                rpc_async_call(replicas[i], Prepare(view_number, cmd, op_number, commit_number));
+                rpc_call(replicas[i], Prepare(view_number, cmd, op_number, commit_number));
             }
         }
         return true;
@@ -275,11 +266,11 @@ role Node {
 
     // A periodic function for the primary to send heartbeats.
     func Tick() {
-        let current_primary: Node = primary_of(view_number);
+        let current_primary: Node = await primary_of(view_number);
         if (replicas[self] == current_primary) {
             for (let i: int = 0; i < len(replicas); i = i + 1) {
                 if (i != self) {
-                    rpc_async_call(replicas[i], Commit(view_number, commit_number));
+                    rpc_call(replicas[i], Commit(view_number, commit_number));
                 }
             }
         }
@@ -287,13 +278,13 @@ role Node {
 
     // Simulates a timeout event on a backup replica.
     func SimulateTimeout() {
-        let current_primary: Node = primary_of(view_number);
+        let current_primary: Node = await primary_of(view_number);
         // Only non-primaries should time out
         if (replicas[self] != current_primary) { 
             enter_view_change(view_number + 1);
             for (let i: int = 0; i < len(replicas); i = i + 1) {
                  if (i != self) {
-                    rpc_async_call(replicas[i], StartViewChange(view_number, replicas[self]));
+                    rpc_call(replicas[i], StartViewChange(view_number, replicas[self]));
                  }
             }
         }
@@ -307,20 +298,20 @@ role Node {
 ClientInterface {
     // Initializes a replica node.
     func init(dest: int, replicas: list<Node>) {
-        rpc_async_call(replicas[dest], Init(dest, replicas));
+        rpc_call(replicas[dest], Init(dest, replicas));
     }
 
     // Sends a new command to a specific replica.
     func newEntry(dest: Node, cmd: Command) -> bool {
-        return rpc_call(dest, NewEntry(cmd));
+        return rpc_call(dest, NewEntry(cmd))!;
     }
 
     func getCommittedLog(dest: Node) -> list<Command> {
-        return rpc_call(dest, GetCommittedLog());
+        return rpc_call(dest, GetCommittedLog())!;
     }
 
     // Triggers a simulated timeout at the destination node.
     func simulateTimeout(dest: Node) {
-        rpc_async_call(dest, SimulateTimeout());
+        rpc_call(dest, SimulateTimeout());
     }
 }
