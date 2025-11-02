@@ -81,7 +81,10 @@ let bootlegged_sync_exec (global_state : state) (prog : program)
 
 let print_single_node (node : value Env.t) =
   Env.iter
-    (fun key value -> Printf.printf "%s: %s\n" key (to_string_value value))
+    (fun key value ->
+      (* Only print if the key does not start with "_tmp" *)
+      if not (BatString.starts_with key "_tmp") then
+        Printf.printf "%s: %s\n" key (to_string_value value))
     node
 
 let print_global_nodes (nodes : value Env.t array) =
@@ -190,35 +193,47 @@ let _schedule_vr_executions (global_state : state) (prog : program)
   scheduler "getCommittedLog" [ VNode 0 ]
 
 let rec schedule_random_op (global_state : state) (prog : program)
-    (operation_id_counter : int ref) (client_id : int) : unit =
+    (operation_id_counter : int ref) (client_id : int)
+    (written_keys : string list ref) : unit =
   Random.self_init ();
   let r = Random.float 1.0 in
-
-  let op_name_suffix =
-    if r < 0.01 then "simulateTimeout"
-      (* 1% chance of triggering a view change *)
-    else if r < 0.50 then "newEntry" (* 49% chance of newEntry *)
-    else "getCommittedLog" (* 50% chance of getCommittedLog *)
-  in
-  let op_name = find_client_op_by_suffix prog op_name_suffix in
-
-  let target_node = Random.int num_servers in
-
-  let actuals =
-    if op_name_suffix = "newEntry" then
-      [ VNode target_node; VInt (Random.int 1000) ]
-    else
-      (* Both getCommittedLog and simulateTimeout just take a target node *)
-      [ VNode target_node ]
-  in
-  let op = Env.find prog.client_ops op_name in
-  let env = Env.create 1024 in
-  List.iter2 (fun formal actual -> Env.add env formal actual) op.formals actuals;
 
   let new_op_id =
     operation_id_counter := !operation_id_counter + 1;
     !operation_id_counter
   in
+
+  let op_name_suffix, actuals =
+    if r < 0.00 then
+      (* 1% chance of triggering a view change *)
+      let target_node = Random.int num_servers in
+      ("simulateTimeout", [ VNode target_node ])
+    else if r < 0.50 || List.length !written_keys = 0 then (
+      (* 49% chance of write, OR force write if no keys exist for reading *)
+      let target_node = Random.int num_servers in
+      let new_key = "key_" ^ string_of_int new_op_id in
+      let new_val = "val_" ^ string_of_int (Random.int 1000) in
+
+      (* Add to our list of written keys *)
+      written_keys := new_key :: !written_keys;
+
+      ("write", [ VNode target_node; VString new_key; VString new_val ]))
+    else
+      (* 50% chance of read (and keys exist) *)
+      let target_node = Random.int num_servers in
+
+      (* Pick a random key from the ones we've written *)
+      let key_to_read =
+        List.nth !written_keys (Random.int (List.length !written_keys))
+      in
+
+      ("read", [ VNode target_node; VString key_to_read ])
+  in
+
+  let op_name = find_client_op_by_suffix prog op_name_suffix in
+  let op = Env.find prog.client_ops op_name in
+  let env = Env.create 1024 in
+  List.iter2 (fun formal actual -> Env.add env formal actual) op.formals actuals;
 
   let invocation =
     {
@@ -230,6 +245,7 @@ let rec schedule_random_op (global_state : state) (prog : program)
     }
   in
   DA.add global_state.history invocation;
+
   let new_continuation value =
     let response =
       {
@@ -242,6 +258,7 @@ let rec schedule_random_op (global_state : state) (prog : program)
     in
     DA.add global_state.history response;
     schedule_random_op global_state prog operation_id_counter client_id
+      written_keys
   in
 
   let record =
@@ -262,12 +279,14 @@ let start_random_client_loops (global_state : state) (prog : program)
   let clients_to_start = global_state.free_clients in
   global_state.free_clients <- [];
 
-  (* Empty the list, as they will be permanently busy *)
+  let written_keys = ref [] in
+
   Printf.printf "Starting random work loops for %d clients...\n"
     (List.length clients_to_start);
   List.iter
     (fun client_id ->
-      schedule_random_op global_state prog operation_id_counter client_id)
+      schedule_random_op global_state prog operation_id_counter client_id
+        written_keys)
     clients_to_start
 
 let init_clients (global_state : state) (prog : program) : unit =

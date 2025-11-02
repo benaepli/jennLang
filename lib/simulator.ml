@@ -1234,7 +1234,8 @@ let schedule_record (state : state) (program : program)
 
 (* Helper function to schedule a thread *)
 let schedule_thread (state : state) (program : program) (func_name : string)
-    (actuals : value list) (unique_id : int) (free_threads : int list)
+    (actuals : value list) (unique_id : int)
+    (get_free_threads : unit -> int list)
     (update_free_threads : int list -> unit) : unit =
   let rec pick n before after =
     match after with
@@ -1269,7 +1270,8 @@ let schedule_thread (state : state) (program : program) (func_name : string)
               }
             in
             DA.add state.history response;
-            update_free_threads (c :: free_threads)
+            let current_free_list = get_free_threads () in
+            update_free_threads (c :: current_free_list)
           in
           let record =
             {
@@ -1289,17 +1291,19 @@ let schedule_thread (state : state) (program : program) (func_name : string)
   in
   pick
     (Random.self_init ();
-     Random.int (List.length free_threads))
-    [] free_threads
+     Random.int (List.length (get_free_threads ())))
+    [] (get_free_threads ())
 
 (* Choose a client without a pending operation, create a new activation record
    to execute it, and append the invocation to the history *)
 let schedule_client (state : state) (program : program) (func_name : string)
     (actuals : value list) (unique_id : int) : unit =
-  schedule_thread state program func_name actuals unique_id state.free_clients
+  schedule_thread state program func_name actuals unique_id
+    (fun () -> state.free_clients)
     (fun threads -> state.free_clients <- threads)
 
 let schedule_sys_thread (state : state) (program : program) (func_name : string)
     (actuals : value list) (unique_id : int) : unit =
   schedule_thread state program func_name actuals unique_id
-    state.free_sys_threads (fun threads -> state.free_sys_threads <- threads)
+    (fun () -> state.free_sys_threads)
+    (fun threads -> state.free_sys_threads <- threads)

@@ -5,3 +5,4 @@ output_dump/*
 .venv
 .vscode
 output*.json
+output*.log
