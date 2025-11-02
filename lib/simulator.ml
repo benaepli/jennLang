@@ -65,6 +65,7 @@ type expr =
   | ECoalesce of expr * expr
   | ECreatePromise
   | ECreateLock
+  | ESome of expr
 [@@deriving ord]
 
 type lhs = LVar of string | LAccess of expr * expr | LTuple of string list
@@ -355,6 +356,7 @@ let rec to_string_expr (e : expr) : string =
       "ECoalesce(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
   | ECreatePromise -> "ECreatePromise"
   | ECreateLock -> "ECreateLock"
+  | ESome e -> "ESome(" ^ to_string_expr e ^ ")"
 
 let to_string_lhs (l : lhs) : string =
   match l with
@@ -823,6 +825,7 @@ else poll_for_response tl *)
       | None -> eval env e_default)
   | ECreatePromise -> VFuture (ref None)
   | ECreateLock -> VLock (ref false)
+  | ESome e -> VOption (Some (eval env e))
 
 let eval_lhs (env : record_env) (lhs : lhs) : lvalue =
   match lhs with

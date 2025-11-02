@@ -208,7 +208,7 @@ let rec schedule_random_op (global_state : state) (prog : program)
       (* 1% chance of triggering a view change *)
       let target_node = Random.int num_servers in
       ("simulateTimeout", [ VNode target_node ])
-    else if r < 0.50 || List.length !written_keys = 0 then (
+    else if r < 0.49 || List.length !written_keys = 0 then (
       (* 49% chance of write, OR force write if no keys exist for reading *)
       let target_node = Random.int num_servers in
       let new_key = "key_" ^ string_of_int new_op_id in

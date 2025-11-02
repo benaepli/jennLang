@@ -1,5 +1,5 @@
 type Command {
-    op: int; // 0: Read, 1: Write
+    kind: int; // 0: Read, 1: Write
     key: string;
     value: string?;
 };
@@ -77,9 +77,9 @@ role Node {
             
             let result: string? = nil;
             
-            if (cmd.op == 1) { // Write
+            if (cmd.kind == 1) { // Write
                 kv_store[cmd.key] = cmd.value!;
-            } elseif (cmd.op == 0) { // Read
+            } elseif (cmd.kind == 0) { // Read
                 if (exists(kv_store, cmd.key)) {
                     result = kv_store[cmd.key];
                 }
@@ -100,9 +100,10 @@ role Node {
         rpc_call(await primary_of(view_number), PrepareOK(view_number, op_number, replicas[self]));
         if (msg.commit_number > commit_number) {
             commit_number = msg.commit_number;
-            apply_committed_entries();
+            apply_committed_entries()!;
         }
     }
+    
     func drain_buffer() {
         for (; exists(prepare_buffer, op_number + 1); ) {
             let next_op: int = op_number + 1;
@@ -121,7 +122,7 @@ role Node {
                 commit_number: other_commit_number
             };
         }
-        drain_buffer();
+        drain_buffer()!;
     }
 
     func PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
@@ -134,6 +135,7 @@ role Node {
             let mid: int = await f();
             if (prepare_ok_counts[other_op_number] >= mid and other_op_number > commit_number) {
                 commit_number = other_op_number;
+                apply_committed_entries()!;
                 for (let i: int = 0; i < len(replicas); i = i + 1) {
                     if (i != self) {
                         rpc_call(replicas[i], Commit(view_number, commit_number));
@@ -145,7 +147,7 @@ role Node {
     func Commit(other_view: int, other_commit_number: int) {
         if (other_view == view_number and other_commit_number > commit_number) {
             commit_number = other_commit_number;
-            apply_committed_entries();
+            apply_committed_entries()!;
         }
     }
 
@@ -170,7 +172,7 @@ role Node {
         kv_store = {};
         applied_op_count = 0;
         pending_requests = {}; 
-        apply_committed_entries();
+        apply_committed_entries()!;
     }
 
     func StartViewChange(new_view: int, replica_id: Node) {
@@ -266,7 +268,7 @@ role Node {
 
         if (len(replicas) == 1) {
             commit_number = op_number;
-            apply_committed_entries(); // This will resolve the promise
+            apply_committed_entries()!; // This will resolve the promise
         } else {
              for (let i: int = 0; i < len(replicas); i = i + 1) {
                 if (i != self) {
@@ -282,14 +284,14 @@ role Node {
 
     // Accepts a new Write command from a client.
     func Write(key: string, value: string) -> future<string?> {
-        let cmd: Command = Command{ op: 1, key: key, value: value }; // op=1 for Write
+        let cmd: Command = Command{ kind: 1, key: key, value: value }; // op=1 for Write
         return await NewEntry(cmd);
     }
 
     // Accepts a new Read command from a client.
     func Read(key: string) -> future<string?> {
         // A Read is also a log entry to ensure linearizability
-        let cmd: Command = Command{ op: 0, key: key, value: nil }; // op=0 for Read
+        let cmd: Command = Command{ kind: 0, key: key, value: nil }; // op=0 for Read
         return await NewEntry(cmd);
     }
 
