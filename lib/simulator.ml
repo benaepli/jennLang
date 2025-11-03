@@ -76,6 +76,7 @@ type instr =
   | Async of lhs * expr * string * expr list (* jenndbg RPC*)
   | Copy of lhs * expr
   | Resolve of lhs * expr
+  | SyncCall of lhs * string * expr list
     (* | Write of string * string (*jenndbg write a value *) *)
 [@@deriving ord]
 
@@ -377,6 +378,10 @@ let to_string (l : 'a label) : string =
       | Copy (_, _) -> "instr copy"
       | Resolve (lhs, expr) ->
           "Instr(Resolve(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr
+          ^ "))"
+      | SyncCall (lhs, func_name, actual_exprs) ->
+          "Instr(SyncCall(" ^ to_string_lhs lhs ^ ", " ^ func_name ^ ", "
+          ^ String.concat ", " (List.map to_string_expr actual_exprs)
           ^ "))")
   | Pause _ -> "Pause"
   | Await (lhs, expr, _) ->
@@ -507,6 +512,7 @@ type function_info = {
   name : string;
   formals : string list;
   locals : (string * expr) list;
+  is_sync : bool;
 }
 
 (* Representation of program syntax *)
@@ -864,6 +870,7 @@ let store (lhs : lhs) (vl : value) (env : record_env) : unit =
   | LVTuple _ -> failwith "how to store LVTuples?"
 
 exception Halt
+exception SyncReturn of value
 
 let copy (lhs : lhs) (vl : value) (env : record_env) : unit =
   match eval_lhs env lhs with
@@ -883,9 +890,11 @@ let copy (lhs : lhs) (vl : value) (env : record_env) : unit =
 
 let function_info name program =
   try Env.find program.rpc name
-  with Not_found ->
-    Printf.printf "function %s is not defined\n" name;
-    failwith "Function not found"
+  with Not_found -> (
+    try Env.find program.client_ops name
+    with Not_found ->
+      Printf.printf "function %s is not defined in rpc or client_ops\n" name;
+      failwith "Function not found")
 
 (* Helper to create RPC record - factored out to reduce duplication *)
 let create_rpc_record node_id func actuals env program record =
@@ -916,6 +925,82 @@ let create_rpc_record node_id func actuals env program record =
     x = record.x;
     f = record.f;
   }
+
+let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
+    : value =
+  let current_pc = ref start_pc in
+  try
+    while true do
+      let label = CFG.label program.cfg !current_pc in
+      match label with
+      | Instr (instruction, next) -> (
+          current_pc := next;
+          match instruction with
+          | Assign (lhs, rhs) -> store lhs (eval env rhs) env
+          | Copy (lhs, rhs) -> copy lhs (eval env rhs) env
+          | SyncCall (lhs, func_name, actual_exprs) ->
+              let actual_values = List.map (eval env) actual_exprs in
+              let { entry; formals; locals; is_sync; _ } =
+                function_info func_name program
+              in
+
+              if not is_sync then
+                failwith
+                  ("Runtime Error: 'sync' function tried to call non-sync \
+                    function '" ^ func_name ^ "' synchronously");
+
+              let callee_env = Env.create 1024 in
+              (try
+                 List.iter2
+                   (fun f a -> Env.add callee_env f a)
+                   formals actual_values
+               with Invalid_argument _ ->
+                 failwith "Mismatched arguments in recursive sync call");
+
+              List.iter
+                (fun (var_name, default_expr) ->
+                  Env.add callee_env var_name (eval env default_expr))
+                locals;
+
+              let callee_record_env =
+                { local_env = callee_env; node_env = env.node_env }
+              in
+              Env.add callee_record_env.local_env "self" (load "self" env);
+
+              (* Pass 'self' *)
+              let result = exec_sync program callee_record_env entry in
+              store lhs result env
+          | Async (_, _, _, _) ->
+              failwith "Runtime Error: 'sync' function cannot execute 'Async'"
+          | Resolve (_, _) ->
+              failwith "Runtime Error: 'sync' function cannot 'Resolve'")
+      | Cond (cond, bthen, belse) -> (
+          match eval env cond with
+          | VBool true -> current_pc := bthen
+          | VBool false -> current_pc := belse
+          | other ->
+              failwith
+                (Printf.sprintf "Type error in sync cond: expected bool, got %s"
+                   (type_name other)))
+      | Return expr -> raise (SyncReturn (eval env expr))
+      | Print (expr, next) ->
+          Printf.printf "%s\n" (to_string_value (eval env expr));
+          current_pc := next
+      | Break target_vertex ->
+          (* A 'break' in a sync context is just a jump *)
+          current_pc := target_vertex
+      | ForLoopIn (_, _, _, _) ->
+          failwith
+            "Runtime Error: 'for..in' loop cannot be used in a 'sync' function"
+      | Lock (_, _) | Unlock (_, _) ->
+          failwith
+            "Runtime Error: 'lock'/'unlock' cannot be used in a 'sync' function"
+      | Pause _ | Await (_, _, _) | SpinAwait (_, _) ->
+          failwith
+            "Runtime Error: Async operation (Pause, Await) in 'sync' function"
+    done;
+    VUnit (* Unreachable *)
+  with SyncReturn v -> v
 
 (* Execute record until pause/return.  Invariant: record does *not* belong to
    state.records *)
@@ -1000,6 +1085,47 @@ let exec (state : state) (program : program) (record : record) =
                 failwith
                   (Printf.sprintf "Type error: expected node for RPC, got %s"
                      (type_name other)))
+        | SyncCall (lhs, func_name, actual_exprs) ->
+            (* Evaluate args in the async env *)
+            let actual_values = List.map (eval env) actual_exprs in
+
+            let { entry; formals; locals; is_sync; _ } =
+              function_info func_name program
+            in
+
+            if not is_sync then
+              failwith
+                ("Runtime Error: 'exec' tried to SyncCall non-sync function: "
+               ^ func_name);
+
+            (* Create the callee's environment *)
+            let callee_env = Env.create 1024 in
+            (try
+               List.iter2
+                 (fun f a -> Env.add callee_env f a)
+                 formals actual_values
+             with Invalid_argument _ ->
+               failwith "Mismatched arguments in sync call");
+
+            List.iter
+              (fun (var_name, default_expr) ->
+                Env.add callee_env var_name (eval env default_expr)
+                (* Eval defaults in caller's context *))
+              locals;
+
+            let callee_record_env =
+              {
+                local_env = callee_env;
+                node_env = env.node_env (* Share node state *);
+              }
+            in
+            Env.add callee_record_env.local_env "self" (VNode record.node);
+
+            (* Run the sync call to completion *)
+            let return_value = exec_sync program callee_record_env entry in
+
+            store lhs return_value env;
+            loop ()
         | Assign (lhs, rhs) -> store lhs (eval env rhs) env
         | Copy (lhs, rhs) -> copy lhs (eval env rhs) env
         | Resolve (lhs, rhs) -> (

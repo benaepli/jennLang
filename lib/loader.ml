@@ -182,6 +182,14 @@ let instr_of_yojson json : instr =
       match to_list value with
       | [ l; r ] -> Resolve (lhs_of_yojson l, expr_of_yojson r)
       | _ -> failwith "Instr::Resolve expects 2 args")
+  | "SyncCall" -> (
+      match to_list value with
+      | [ l; f; args ] ->
+          SyncCall
+            ( lhs_of_yojson l,
+              to_string f,
+              List.map expr_of_yojson (to_list args) )
+      | _ -> failwith "Instr::SyncCall expects 3 args")
   | _ -> failwith ("Unknown instr key: " ^ key)
 
 let label_of_yojson json : CFG.vertex label =
@@ -237,6 +245,7 @@ let function_info_of_yojson json : function_info =
              | [ name_json; expr_json ] ->
                  (to_string name_json, expr_of_yojson expr_json)
              | _ -> failwith "locals entry must be a [name, expr] pair");
+    is_sync = member "is_sync" json |> to_bool;
   }
 
 let program_of_yojson json : program =
