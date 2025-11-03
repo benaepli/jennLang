@@ -17,6 +17,12 @@ type DoViewChangeMsg {
     commit_number: int;
 };
 
+type ClientResponse {
+    is_primary: bool;
+    value: string?;
+    primary: Node;
+};
+
 type PrepareMsg {
     request: Command;
     commit_number: int;
@@ -34,7 +40,7 @@ role Node {
     var applied_op_count: int = 0;
     
     // Concurrency state
-    var pending_requests: map<int, promise<string?>> = {};
+    var pending_requests: map<int, promise<ClientResponse>> = {};
 
     // Volatile state
     var status: int = 0;
@@ -84,9 +90,15 @@ role Node {
                     result = kv_store[cmd.key];
                 }
             }
-            
+
             if (exists(pending_requests, op_n)) {
-                resolve_promise(pending_requests[op_n], result);
+                // Resolve with a success status, the read result, and self as primary.
+                var resp: ClientResponse = ClientResponse{
+                    is_primary: true, 
+                    value: result, 
+                    primary: replicas[self]
+                };
+                resolve_promise(pending_requests[op_n], resp);
                 erase(pending_requests, op_n);
             }
             
@@ -248,13 +260,17 @@ role Node {
     func RecoveryResponse(nonce: int, view: int, log: list<LogEntry>, op_number: int, commit_number: int) {}
 
     // Accepts a new command, logs it, and starts the replication process.
-    // This function contains the logic previously duplicated in Read/Write.
-    func NewEntry(cmd: Command) -> future<string?> {
+    func NewEntry(cmd: Command) -> future<ClientResponse> {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) {
-            // Not the primary. Return a future that resolves to nil (failure).
-            var p_err: promise<string?> = create_promise();
-            resolve_promise(p_err, nil); 
+            // Not the primary. Return a failure/redirect response.
+            var p_err: promise<ClientResponse> = create_promise();
+            var resp: ClientResponse = ClientResponse{
+                is_primary: false,
+                value: nil,
+                primary: current_primary 
+            };
+            resolve_promise(p_err, resp); 
             return create_future(p_err);
         }
 
@@ -263,7 +279,7 @@ role Node {
         prepare_ok_counts[op_number] = 0;
 
         // Create a promise for the client to await commitment
-        var p: promise<string?> = create_promise();
+        var p: promise<ClientResponse> = create_promise();
         pending_requests[op_number] = p;
 
         if (len(replicas) == 1) {
@@ -282,16 +298,17 @@ role Node {
         return create_future(p);
     }
 
+
     // Accepts a new Write command from a client.
-    func Write(key: string, value: string) -> future<string?> {
-        var cmd: Command = Command{ kind: 1, key: key, value: value }; // op=1 for Write
+    func Write(key: string, value: string) -> future<ClientResponse> {
+        var cmd: Command = Command{ kind: 1, key: key, value: value };
         return @NewEntry(cmd);
     }
 
     // Accepts a new Read command from a client.
-    func Read(key: string) -> future<string?> {
+    func Read(key: string) -> future<ClientResponse> {
         // A Read is also a log entry to ensure linearizability
-        var cmd: Command = Command{ kind: 0, key: key, value: nil }; // op=0 for Read
+        var cmd: Command = Command{ kind: 0, key: key, value: nil };
         return @NewEntry(cmd);
     }
 
@@ -305,6 +322,7 @@ role Node {
             }
         }
     }
+    
     func SimulateTimeout() {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) { 
@@ -316,7 +334,7 @@ role Node {
             }
         }
     }
-    
+
     func GetKVStore() -> map<string, string> {
         return kv_store;
     }
@@ -328,19 +346,42 @@ ClientInterface {
         rpc_call(replicas[dest], Init(dest, replicas));
     }
 
-    // Sends a new write command to a specific replica.
+    // Sends a new write command to a specific replica, retrying on redirect.
     func write(dest: Node, key: string, value: string) {
-        // The first '@' awaits the rpc_call, which returns a future<string?>.
-        // The second '@' awaits that future, which resolves when the op is committed.
-        // We discard the result (nil for writes).
-        @@rpc_call(dest, Write(key, value));
+        var current_target: Node = dest;
+
+        for (;;) {
+            // Await the RPC, then await the commit future
+            var resp: ClientResponse = @@rpc_call(current_target, Write(key, value));
+            
+            if (resp.is_primary == true) {
+                // 0 = OK. The write is committed.
+                break;
+            } elseif (resp.is_primary == true) {
+                // 1 = NotPrimary. Update target and retry.
+                current_target = resp.primary;
+            }
+            // Loop continues and retries with the new target
+        }
     }
 
-    // Sends a new read command to a specific replica.
+    // Sends a new read command to a specific replica, retrying on redirect.
     func read(dest: Node, key: string) -> string? {
-        // Await the RPC, then await the commit future.
-        // The final result is string? (the value read, or nil).
-        return @@rpc_call(dest, Read(key));
+        var current_target: Node = dest;
+
+        for (;;) {
+            // Await the RPC, then await the commit future
+            var resp: ClientResponse = @@rpc_call(current_target, Read(key));
+
+            if (resp.is_primary == true) {
+                return resp.value;
+            } elseif (resp.is_primary == true) {
+                current_target = resp.primary;
+            }
+            // Loop continues and retries with the new target
+        }
+
+        return nil;
     }
 
     // Gets the entire KV store from a replica (for debugging/testing).

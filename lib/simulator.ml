@@ -1298,7 +1298,9 @@ do any work. *)
         Printf.printf "%s\n" (to_string_value (eval env expr));
         record.pc <- next;
         loop ()
-    | Break _ -> raise Halt
+    | Break target_vertex ->
+        record.pc <- target_vertex;
+        loop ()
     | Lock (lock_expr, next) ->
         let lock_ref = expect_lock (eval env lock_expr) in
         if !lock_ref = false then (
