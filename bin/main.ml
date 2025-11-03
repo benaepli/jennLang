@@ -70,7 +70,7 @@ let bootlegged_sync_exec (global_state : state) (prog : program)
     (sever_all_to_tail_but_mid : bool) (partition_away_nodes : int list)
     (randomly_delay_msgs : bool) : unit =
   let count = ref 0 in
-  for _ = 0 to 100000 do
+  for _ = 0 to 1000 do
     if not (List.length global_state.records = 0) then (
       count := !count + 1;
       schedule_record global_state prog randomly_drop_msgs cut_tail_from_mid
@@ -203,21 +203,24 @@ let rec schedule_random_op (global_state : state) (prog : program)
     !operation_id_counter
   in
 
-  let op_name_suffix, actuals =
+  let op_name_suffix, actuals, on_response_hook =
     if r < 0.00 then
       (* 1% chance of triggering a view change *)
       let target_node = Random.int num_servers in
-      ("simulateTimeout", [ VNode target_node ])
-    else if r < 0.49 || List.length !written_keys = 0 then (
+      ("simulateTimeout", [ VNode target_node ], fun () -> ())
+    else if r < 0.49 || List.length !written_keys = 0 then
       (* 49% chance of write, OR force write if no keys exist for reading *)
       let target_node = Random.int num_servers in
       let new_key = "key_" ^ string_of_int new_op_id in
       let new_val = "val_" ^ string_of_int (Random.int 1000) in
 
-      (* Add to our list of written keys *)
-      written_keys := new_key :: !written_keys;
+      (* Create a hook to add the key to written_keys upon receiving response *)
+      let hook () =
+        let _ = Printf.printf "Written key: %s\n" new_key in
+        written_keys := new_key :: !written_keys
+      in
 
-      ("write", [ VNode target_node; VString new_key; VString new_val ]))
+      ("write", [ VNode target_node; VString new_key; VString new_val ], hook)
     else
       (* 50% chance of read (and keys exist) *)
       let target_node = Random.int num_servers in
@@ -227,13 +230,21 @@ let rec schedule_random_op (global_state : state) (prog : program)
         List.nth !written_keys (Random.int (List.length !written_keys))
       in
 
-      ("read", [ VNode target_node; VString key_to_read ])
+      ("read", [ VNode target_node; VString key_to_read ], fun () -> ())
   in
 
   let op_name = find_client_op_by_suffix prog op_name_suffix in
   let op = Env.find prog.client_ops op_name in
   let env = Env.create 1024 in
   List.iter2 (fun formal actual -> Env.add env formal actual) op.formals actuals;
+
+  let temp_record_env =
+    { local_env = env; node_env = global_state.nodes.(client_id) }
+  in
+  List.iter
+    (fun (var_name, default_expr) ->
+      Env.add env var_name (eval temp_record_env default_expr))
+    op.locals;
 
   let invocation =
     {
@@ -257,6 +268,8 @@ let rec schedule_random_op (global_state : state) (prog : program)
       }
     in
     DA.add global_state.history response;
+    (* Execute the hook after receiving the response *)
+    on_response_hook ();
     schedule_random_op global_state prog operation_id_counter client_id
       written_keys
   in

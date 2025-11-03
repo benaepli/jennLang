@@ -896,7 +896,6 @@ let function_info name program =
       Printf.printf "function %s is not defined in rpc or client_ops\n" name;
       failwith "Function not found")
 
-(* Helper to create RPC record - factored out to reduce duplication *)
 let create_rpc_record node_id func actuals env program record =
   let { entry; formals; locals; _ } = function_info func program in
   let new_env = Env.create 1024 in
@@ -1410,6 +1409,13 @@ let schedule_thread (state : state) (program : program) (func_name : string)
             (fun formal actual -> Env.add env formal actual)
             op.formals actuals;
 
+          let temp_record_env =
+            { local_env = env; node_env = state.nodes.(c) }
+          in
+          List.iter
+            (fun (var_name, default_expr) ->
+              Env.add env var_name (eval temp_record_env default_expr))
+            op.locals;
           let invocation =
             {
               client_id = c;

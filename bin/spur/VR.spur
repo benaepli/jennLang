@@ -19,6 +19,7 @@ type DoViewChangeMsg {
 
 type ClientResponse {
     is_primary: bool;
+    key: string?;
     value: string?;
     primary: Node;
 };
@@ -55,6 +56,10 @@ role Node {
     var do_view_change_count: int = 0;
     var do_view_change_messages: list<DoViewChangeMsg> = [];
     var recovery_response_count: int = 0;
+
+    var commands: list<Command> = [];
+    var keys: list<string> = [];
+
     
     func Init(me: int, peers: list<Node>) {
         self = me;
@@ -82,19 +87,30 @@ role Node {
             var cmd: Command = entry.op;
             
             var result: string? = nil;
-            
+              println("Command");
+                println(cmd.key);
+
             if (cmd.kind == 1) { // Write
                 kv_store[cmd.key] = cmd.value!;
+                println("Here");
+                println(cmd.key);
+                println(kv_store[cmd.key]);
             } elseif (cmd.kind == 0) { // Read
                 if (exists(kv_store, cmd.key)) {
                     result = kv_store[cmd.key];
+                } else {
+                    println("Impossible?");
+                    println(cmd.key);
                 }
+            } else {
+                println("Impossible");
             }
 
             if (exists(pending_requests, op_n)) {
                 // Resolve with a success status, the read result, and self as primary.
                 var resp: ClientResponse = ClientResponse{
                     is_primary: true, 
+                    key: cmd.key,
                     value: result, 
                     primary: replicas[self]
                 };
@@ -106,25 +122,6 @@ role Node {
         }
     }
 
-    func process_entry(op_n: int, msg: PrepareMsg) {
-        op_number = op_n;
-        log = append(log, LogEntry{ view: view_number, op: msg.request });
-        rpc_call(primary_of(view_number), PrepareOK(view_number, op_number, replicas[self]));
-        if (msg.commit_number > commit_number) {
-            commit_number = msg.commit_number;
-            apply_committed_entries();
-        }
-    }
-    
-    func drain_buffer() {
-        for (; exists(prepare_buffer, op_number + 1); ) {
-            var next_op: int = op_number + 1;
-            var msg: PrepareMsg = prepare_buffer[next_op];
-            process_entry(next_op, msg);  
-            erase(prepare_buffer, next_op);
-        }
-    }
-    
     func Prepare(other_view: int, other_request: Command, other_op_number: int, other_commit_number: int) {
         if (other_view != view_number) { return (); }
         if (other_op_number <= op_number) { return (); }
@@ -134,7 +131,21 @@ role Node {
                 commit_number: other_commit_number
             };
         }
-        @drain_buffer();
+        for (; exists(prepare_buffer, op_number + 1); ) {
+            var next_op: int = op_number + 1;
+            var msg: PrepareMsg = prepare_buffer[next_op];
+            // process_entry(next_op, msg);  
+            
+            op_number = next_op;
+            log = append(log, LogEntry{ view: view_number, op: msg.request });
+            if (msg.commit_number > commit_number) {
+                commit_number = msg.commit_number;
+                apply_committed_entries();
+            }
+            rpc_call(primary_of(view_number), PrepareOK(view_number, op_number, replicas[self]));
+
+            erase(prepare_buffer, next_op);
+        }
     }
 
     func PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
@@ -150,7 +161,7 @@ role Node {
                 apply_committed_entries();
                 for (var i: int = 0; i < len(replicas); i = i + 1) {
                     if (i != self) {
-                        rpc_call(replicas[i], Commit(view_number, commit_number));
+                        @rpc_call(replicas[i], Commit(view_number, commit_number));
                     }
                 }
             }
@@ -267,6 +278,7 @@ role Node {
             var p_err: promise<ClientResponse> = create_promise();
             var resp: ClientResponse = ClientResponse{
                 is_primary: false,
+                key: nil,
                 value: nil,
                 primary: current_primary 
             };
@@ -298,18 +310,21 @@ role Node {
         return create_future(p);
     }
 
-
     // Accepts a new Write command from a client.
-    func Write(key: string, value: string) -> future<ClientResponse> {
+    func Write(key: string, value: string) -> ClientResponse {
+        keys = append(keys, key);
         var cmd: Command = Command{ kind: 1, key: key, value: value };
-        return @NewEntry(cmd);
+        commands = append(commands, cmd);
+        var response: future<ClientResponse> = @NewEntry(cmd);
+        return await response;
     }
 
     // Accepts a new Read command from a client.
-    func Read(key: string) -> future<ClientResponse> {
+    func Read(key: string) -> ClientResponse {
         // A Read is also a log entry to ensure linearizability
         var cmd: Command = Command{ kind: 0, key: key, value: nil };
-        return @NewEntry(cmd);
+        commands = append(commands, cmd);
+        return @@NewEntry(cmd);
     }
 
     func Tick() {
@@ -341,9 +356,11 @@ role Node {
 }
 
 ClientInterface {
+    var responses: list<(ClientResponse, string)> = [];
+
     // Initializes a replica node.
     func init(dest: int, replicas: list<Node>) {
-        rpc_call(replicas[dest], Init(dest, replicas));
+        @rpc_call(replicas[dest], Init(dest, replicas));
     }
 
     // Sends a new write command to a specific replica, retrying on redirect.
@@ -351,17 +368,16 @@ ClientInterface {
         var current_target: Node = dest;
 
         for (;;) {
-            // Await the RPC, then await the commit future
-            var resp: ClientResponse = @@rpc_call(current_target, Write(key, value));
+            var resp: ClientResponse = @rpc_call(current_target, Write(key, value));
             
             if (resp.is_primary == true) {
-                // 0 = OK. The write is committed.
-                break;
-            } elseif (resp.is_primary == true) {
-                // 1 = NotPrimary. Update target and retry.
-                current_target = resp.primary;
+                println("Written");
+                println(key);
+                responses = append(responses, (resp, key));
+                return ();
             }
-            // Loop continues and retries with the new target
+            println("Client redirected for write");
+            current_target = resp.primary;
         }
     }
 
@@ -370,15 +386,14 @@ ClientInterface {
         var current_target: Node = dest;
 
         for (;;) {
-            // Await the RPC, then await the commit future
-            var resp: ClientResponse = @@rpc_call(current_target, Read(key));
+            var resp: ClientResponse = @rpc_call(current_target, Read(key));
 
             if (resp.is_primary == true) {
+                println("Read key");
+                println(key);
                 return resp.value;
-            } elseif (resp.is_primary == true) {
-                current_target = resp.primary;
             }
-            // Loop continues and retries with the new target
+            current_target = resp.primary;
         }
 
         return nil;
