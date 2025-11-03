@@ -972,8 +972,30 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
               store lhs result env
           | Async (_, _, _, _) ->
               failwith "Runtime Error: 'sync' function cannot execute 'Async'"
-          | Resolve (_, _) ->
-              failwith "Runtime Error: 'sync' function cannot 'Resolve'")
+          | Resolve (lhs, rhs) -> (
+              let value_to_resolve = eval env rhs in
+              let promise_val =
+                match lhs with
+                | LVar var -> load var env
+                | LAccess (collection, key) ->
+                    eval env (EFind (collection, key))
+                | LTuple _ ->
+                    failwith
+                      ("Runtime error: Cannot resolve a tuple at "
+                     ^ to_string_lhs lhs)
+              in
+              match promise_val with
+              | VFuture r ->
+                  if !r = None then r := Some value_to_resolve
+                  else
+                    failwith
+                      ("Runtime error: Promise already resolved at "
+                     ^ to_string_lhs lhs)
+              | other ->
+                  failwith
+                    (Printf.sprintf
+                       "Type error: Attempted to resolve %s (not a promise)"
+                       (type_name other))))
       | Cond (cond, bthen, belse) -> (
           match eval env cond with
           | VBool true -> current_pc := bthen
@@ -1095,7 +1117,7 @@ let exec (state : state) (program : program) (record : record) =
 
             if not is_sync then
               failwith
-                ("Runtime Error: 'exec' tried to SyncCall non-sync function: "
+                ("Runtime error: 'exec' tried to SyncCall non-sync function: "
                ^ func_name);
 
             (* Create the callee's environment *)
