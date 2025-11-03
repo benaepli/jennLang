@@ -24,58 +24,58 @@ type PrepareMsg {
 
 role Node {
     // Persistent state
-    let self: int = 0;
-    let replicas: list<Node> = [];
-    let view_number: int = 0;
-    let log: list<LogEntry> = [];
+    var self: int = 0;
+    var replicas: list<Node> = [];
+    var view_number: int = 0;
+    var log: list<LogEntry> = [];
 
     // State machine state
-    let kv_store: map<string, string> = {};
-    let applied_op_count: int = 0;
+    var kv_store: map<string, string> = {};
+    var applied_op_count: int = 0;
     
     // Concurrency state
-    let pending_requests: map<int, promise<string?>> = {};
+    var pending_requests: map<int, promise<string?>> = {};
 
     // Volatile state
-    let status: int = 0;
+    var status: int = 0;
     // 0: normal, 1: view-change, 2: recovering
-    let op_number: int = 0;
-    let commit_number: int = 0;
-    let normal_view: int = 0;
-    let prepare_ok_counts: map<int, int> = {};
-    let prepare_buffer: map<int, PrepareMsg> = {};
+    var op_number: int = 0;
+    var commit_number: int = 0;
+    var normal_view: int = 0;
+    var prepare_ok_counts: map<int, int> = {};
+    var prepare_buffer: map<int, PrepareMsg> = {};
 
-    let start_view_change_count: int = 0;
-    let do_view_change_count: int = 0;
-    let do_view_change_messages: list<DoViewChangeMsg> = [];
-    let recovery_response_count: int = 0;
+    var start_view_change_count: int = 0;
+    var do_view_change_count: int = 0;
+    var do_view_change_messages: list<DoViewChangeMsg> = [];
+    var recovery_response_count: int = 0;
     
     func Init(me: int, peers: list<Node>) {
         self = me;
-        for (let i: int = 0; i < len(peers); i = i + 1) {
+        for (var i: int = 0; i < len(peers); i = i + 1) {
             replicas = append(replicas, peers[i]);
         }
     }
 
     func primary_of(v: int) -> Node {
-        let num_servers: int = len(replicas);
+        var num_servers: int = len(replicas);
         return replicas[v % num_servers];
     }
     
     func f() -> int {
-        let num_servers: int = len(replicas);
+        var num_servers: int = len(replicas);
         return (num_servers - 1) / 2;
     }
 
     // Applies committed entries to the KV store
     func apply_committed_entries() {
         for (; applied_op_count < commit_number and applied_op_count < len(log) ;) {
-            let i: int = applied_op_count;
-            let op_n: int = i + 1; 
-            let entry: LogEntry = log[i];
-            let cmd: Command = entry.op;
+            var i: int = applied_op_count;
+            var op_n: int = i + 1; 
+            var entry: LogEntry = log[i];
+            var cmd: Command = entry.op;
             
-            let result: string? = nil;
+            var result: string? = nil;
             
             if (cmd.kind == 1) { // Write
                 kv_store[cmd.key] = cmd.value!;
@@ -106,8 +106,8 @@ role Node {
     
     func drain_buffer() {
         for (; exists(prepare_buffer, op_number + 1); ) {
-            let next_op: int = op_number + 1;
-            let msg: PrepareMsg = prepare_buffer[next_op];
+            var next_op: int = op_number + 1;
+            var msg: PrepareMsg = prepare_buffer[next_op];
             process_entry(next_op, msg);  
             erase(prepare_buffer, next_op);
         }
@@ -126,17 +126,17 @@ role Node {
     }
 
     func PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
-        let current_primary: Node = await primary_of(view_number);
+        var current_primary: Node = await primary_of(view_number);
         if (replicas[self] == current_primary and other_view == view_number) {
             if (!exists(prepare_ok_counts, other_op_number)) {
                 prepare_ok_counts[other_op_number] = 0;
             }
             prepare_ok_counts[other_op_number] = prepare_ok_counts[other_op_number] + 1;
-            let mid: int = await f();
+            var mid: int = await f();
             if (prepare_ok_counts[other_op_number] >= mid and other_op_number > commit_number) {
                 commit_number = other_op_number;
                 apply_committed_entries()!;
-                for (let i: int = 0; i < len(replicas); i = i + 1) {
+                for (var i: int = 0; i < len(replicas); i = i + 1) {
                     if (i != self) {
                         rpc_call(replicas[i], Commit(view_number, commit_number));
                     }
@@ -178,24 +178,24 @@ role Node {
     func StartViewChange(new_view: int, replica_id: Node) {
         if (new_view > view_number) {
             enter_view_change(new_view);
-            for (let i: int = 0; i < len(replicas); i = i + 1) {
+            for (var i: int = 0; i < len(replicas); i = i + 1) {
                  if (i != self) {
                     rpc_call(replicas[i], StartViewChange(view_number, replicas[self]));
                  }
             }
         } elseif (new_view == view_number and status == 1) {
             start_view_change_count = start_view_change_count + 1;
-            let f_val: int = (len(replicas) - 1) / 2;
-            let quorum: int = f_val + 1;
+            var f_val: int = (len(replicas) - 1) / 2;
+            var quorum: int = f_val + 1;
             if (start_view_change_count == quorum) {
-                let new_primary: Node = await primary_of(view_number);
+                var new_primary: Node = await primary_of(view_number);
                 rpc_call(new_primary, DoViewChange(view_number, log, normal_view, op_number, commit_number));
             }
         }
     }
 
     func DoViewChange(new_view: int, sender_log: list<LogEntry>, sender_normal_view: int, sender_op_number: int, sender_commit_number: int) {
-        let current_primary: Node = await primary_of(new_view);
+        var current_primary: Node = await primary_of(new_view);
         if (replicas[self] == current_primary and new_view == view_number) {
             do_view_change_count = do_view_change_count + 1;
             do_view_change_messages = append(do_view_change_messages, DoViewChangeMsg{
@@ -204,14 +204,14 @@ role Node {
                 op_number: sender_op_number,
                 commit_number: sender_commit_number
             });
-            let quorum: int = await f() + 1;
+            var quorum: int = await f() + 1;
             if (do_view_change_count == quorum) {
-                let best_log: list<LogEntry> = log;
-                let best_normal_view: int = normal_view;
-                let best_op_number: int = op_number;
-                let max_commit_number: int = commit_number;
-                for (let i: int = 0; i < len(do_view_change_messages); i = i + 1) {
-                    let msg: DoViewChangeMsg = do_view_change_messages[i];
+                var best_log: list<LogEntry> = log;
+                var best_normal_view: int = normal_view;
+                var best_op_number: int = op_number;
+                var max_commit_number: int = commit_number;
+                for (var i: int = 0; i < len(do_view_change_messages); i = i + 1) {
+                    var msg: DoViewChangeMsg = do_view_change_messages[i];
                     if (msg.normal_view > best_normal_view) {
                         best_normal_view = msg.normal_view;
                         best_op_number = msg.op_number;
@@ -225,7 +225,7 @@ role Node {
                     }
                 }
                 enter_normal_mode(new_view, best_log, best_op_number, max_commit_number);
-                for (let i: int = 0; i < len(replicas); i = i + 1) {
+                for (var i: int = 0; i < len(replicas); i = i + 1) {
                     rpc_call(replicas[i], StartView(view_number, log, op_number, commit_number));
                 }
             }
@@ -234,9 +234,9 @@ role Node {
     func StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
         if (new_view >= view_number) {
             enter_normal_mode(new_view, new_log, new_op_number, new_commit_number);
-            let new_primary: Node = await primary_of(view_number);
+            var new_primary: Node = await primary_of(view_number);
             if (replicas[self] != new_primary) {
-                for (let i: int = commit_number + 1; i <= op_number; i = i + 1) {
+                for (var i: int = commit_number + 1; i <= op_number; i = i + 1) {
                     rpc_call(new_primary, PrepareOK(view_number, i, replicas[self]));
                 }
             }
@@ -250,10 +250,10 @@ role Node {
     // Accepts a new command, logs it, and starts the replication process.
     // This function contains the logic previously duplicated in Read/Write.
     func NewEntry(cmd: Command) -> future<string?> {
-        let current_primary: Node = await primary_of(view_number);
+        var current_primary: Node = await primary_of(view_number);
         if (replicas[self] != current_primary) {
             // Not the primary. Return a future that resolves to nil (failure).
-            let p_err: promise<string?> = create_promise();
+            var p_err: promise<string?> = create_promise();
             resolve_promise(p_err, nil); 
             return create_future(p_err);
         }
@@ -263,14 +263,14 @@ role Node {
         prepare_ok_counts[op_number] = 0;
 
         // Create a promise for the client to await commitment
-        let p: promise<string?> = create_promise();
+        var p: promise<string?> = create_promise();
         pending_requests[op_number] = p;
 
         if (len(replicas) == 1) {
             commit_number = op_number;
             apply_committed_entries()!; // This will resolve the promise
         } else {
-             for (let i: int = 0; i < len(replicas); i = i + 1) {
+             for (var i: int = 0; i < len(replicas); i = i + 1) {
                 if (i != self) {
                     // Replicate the command
                     rpc_call(replicas[i], Prepare(view_number, cmd, op_number, commit_number));
@@ -284,21 +284,21 @@ role Node {
 
     // Accepts a new Write command from a client.
     func Write(key: string, value: string) -> future<string?> {
-        let cmd: Command = Command{ kind: 1, key: key, value: value }; // op=1 for Write
+        var cmd: Command = Command{ kind: 1, key: key, value: value }; // op=1 for Write
         return await NewEntry(cmd);
     }
 
     // Accepts a new Read command from a client.
     func Read(key: string) -> future<string?> {
         // A Read is also a log entry to ensure linearizability
-        let cmd: Command = Command{ kind: 0, key: key, value: nil }; // op=0 for Read
+        var cmd: Command = Command{ kind: 0, key: key, value: nil }; // op=0 for Read
         return await NewEntry(cmd);
     }
 
     func Tick() {
-        let current_primary: Node = await primary_of(view_number);
+        var current_primary: Node = await primary_of(view_number);
         if (replicas[self] == current_primary) {
-            for (let i: int = 0; i < len(replicas); i = i + 1) {
+            for (var i: int = 0; i < len(replicas); i = i + 1) {
                 if (i != self) {
                     rpc_call(replicas[i], Commit(view_number, commit_number));
                 }
@@ -306,10 +306,10 @@ role Node {
         }
     }
     func SimulateTimeout() {
-        let current_primary: Node = await primary_of(view_number);
+        var current_primary: Node = await primary_of(view_number);
         if (replicas[self] != current_primary) { 
             enter_view_change(view_number + 1);
-            for (let i: int = 0; i < len(replicas); i = i + 1) {
+            for (var i: int = 0; i < len(replicas); i = i + 1) {
                  if (i != self) {
                     rpc_call(replicas[i], StartViewChange(view_number, replicas[self]));
                  }

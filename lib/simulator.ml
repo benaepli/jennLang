@@ -275,6 +275,7 @@ type 'a label =
   | Instr of instr * 'a (* jenndbg assignments or RPCs *)
   | Pause of 'a (* Insert pause to allow the scheduler to interrupt! *)
   | Await of lhs * expr * 'a
+  | SpinAwait of expr * 'a
   | Return of expr (* jenndbg return...I guess? *)
   (*| Read (* jenndbg read a value *)*)
   | Cond of expr * 'a * 'a
@@ -380,6 +381,7 @@ let to_string (l : 'a label) : string =
   | Pause _ -> "Pause"
   | Await (lhs, expr, _) ->
       "Await(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr ^ ")"
+  | SpinAwait (expr, _) -> "SpinAwait(" ^ to_string_expr expr ^ ")"
   | Return _ -> "Return"
   | Cond (expr, _, _) -> "Cond(" ^ to_string_expr expr ^ ", _, _)"
   | ForLoopIn _ -> "ForLoopIn"
@@ -1047,15 +1049,22 @@ let exec (state : state) (program : program) (record : record) =
                  can't 
 do any work. *)
                 state.records <- record :: state.records)
+        | other ->
+            failwith
+              (Printf.sprintf "Type error in await: expected future, got %s"
+                 (type_name other)))
+    | SpinAwait (expr, next) -> (
+        match eval env expr with
         | VBool b ->
             if b then (
               record.pc <- next;
               loop ())
-            else state.records <- record :: state.records
+            else
+              (* Still waiting. *)
+              state.records <- record :: state.records
         | other ->
             failwith
-              (Printf.sprintf
-                 "Type error in await: expected future or bool, got %s"
+              (Printf.sprintf "Type error in SpinAwait: expected bool, got %s"
                  (type_name other)))
     | Return expr -> record.continuation (eval env expr)
     | Pause next ->

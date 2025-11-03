@@ -196,6 +196,10 @@ let label_of_yojson json : CFG.vertex label =
       match to_list value with
       | [ l; e; v ] -> Await (lhs_of_yojson l, expr_of_yojson e, to_int v)
       | _ -> failwith "Label::Await expects 3 args")
+  | "SpinAwait" -> (
+      match to_list value with
+      | [ e; v ] -> SpinAwait (expr_of_yojson e, to_int v)
+      | _ -> failwith "Label::SpinAwait expects 2 args")
   | "Return" -> Return (expr_of_yojson value)
   | "Cond" -> (
       match to_list value with
