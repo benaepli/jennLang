@@ -1,0 +1,235 @@
+role Node {
+    // --- State Variables ---
+    var r: string = "";
+    var db: map<string, string> = {};
+    var is_committed: map<string, bool> = {};
+    
+    var predecessor: Node? = nil;
+    var pred_predecessor: Node? = nil;
+    var successor: Node? = nil;
+    var succ_successor: Node? = nil;
+    var hd: Node? = nil;
+    var tl: Node? = nil;
+    var self_node: Node? = nil; 
+    
+    var inFailover: bool = false;
+
+    func Read(key: string) -> string? {
+        if (inFailover == true) {
+            spin_await (inFailover == false);
+        }
+        
+        if (r == "Head" or r == "Mid") {
+            if (exists(is_committed, key) == false or is_committed[key] == false) {
+                return @rpc_call(tl!, Read(key));
+            } else {
+                if (exists(db, key)) {
+                    return db[key];
+                }
+                return nil; // Key is committed but not in db? Return nil.
+            }
+        } else {
+            // Tail node always has the committed version
+            if (exists(db, key)) {
+                return db[key];
+            }
+            return nil;
+        }
+    }
+
+    func Write(key: string, value: string) -> () {
+        if (inFailover == true) {
+            spin_await (inFailover == false);
+        }
+
+        if (r == "Head") {
+            // Wait for any previous write to the same key to commit
+            if (exists(is_committed, key) and is_committed[key] == false) {
+                spin_await (is_committed[key] == true);
+            }
+            
+            db[key] = value;
+            is_committed[key] = false;
+            
+            // This is an async call; per hint, rpc_async_call is just rpc_call
+            rpc_call(successor!, Write(key, value));
+            
+            // Wait for the write to be acknowledged up the chain
+            spin_await (is_committed[key] == true);
+            
+        } elseif (r == "Mid") {
+            db[key] = value;
+            is_committed[key] = false;
+            
+            // Propagate write to successor
+            rpc_call(successor!, Write(key, value));
+            
+            // Wait for successor to commit
+            spin_await (is_committed[key] == true);
+            
+            // Acknowledge predecessor
+            rpc_call(predecessor!, AckWrite(key, value));
+            
+        } else {
+            // r == "Tail"
+            db[key] = value;
+            is_committed[key] = true; // Tail commits immediately
+            
+            // Acknowledge predecessor
+            rpc_call(predecessor!, AckWrite(key, value));
+        }
+    }
+    
+    func AckWrite(key: string, value: string) -> () {
+        if (inFailover == true) {
+            spin_await (inFailover == false);
+        }
+        // Acknowledgment received, mark as committed
+        is_committed[key] = true;
+    }
+    
+    func TriggerFailover(failed_node: Node, new_tail: Node) -> () {
+        inFailover = true;
+        
+        if (failed_node == successor) {
+            successor = succ_successor;
+            var dirty_logs: map<string, string> = {};
+            
+            // Spur map iteration syntax: for ((key, value) in map)
+            for ((key, committed) in is_committed) {
+                if (committed == false) {
+                    dirty_logs[key] = db[key];
+                }
+            }
+            @rpc_call(successor!, PropagateDirtyLogs(dirty_logs));
+        }
+        
+        if (failed_node == predecessor!) {
+            predecessor = pred_predecessor;
+            var clean_logs: map<string, string> = {};
+            
+            for ((key, committed) in is_committed) {
+                if (committed == true) {
+                    clean_logs[key] = db[key];
+                }
+            }
+            // This call should block
+            @rpc_call(predecessor!, BackPropagateCleanLogs(clean_logs));
+        }
+
+        tl = new_tail;
+        
+        if (r == "Tail" and new_tail != self_node) {
+            r = "Mid";
+            successor = tl;
+            // This call should block
+            @rpc_call(tl!, PropagateLogsToTail(db));
+        }
+    }
+
+    func EndFailover() -> () {
+        inFailover = false;
+    }
+
+    // --- Internal/Init Functions ---
+
+    func Init(assigned_role: string, pred: Node?, pred_pred: Node?, 
+              succ: Node?, succ_succ: Node?, h: Node?, t: Node?, 
+              s_node: Node?, data: map<string, string>) -> () {
+        
+        r = assigned_role;
+        predecessor = pred;
+        pred_predecessor = pred_pred;
+        successor = succ;
+        succ_successor = succ_succ;
+        hd = h;
+        tl = t;
+        self_node = s_node;
+        
+        db = {};
+        is_committed = {};
+        inFailover = false;
+        
+        for ((key, value) in data) {
+            var temp: int = 1; // Unused in original, kept for fidelity
+            db[key] = value;
+            is_committed[key] = true; // Initial data is committed
+        }
+    }
+
+    // Receiving dirty logs from new predecessor
+    func PropagateDirtyLogs(dirty_logs: map<string, string>) -> () {
+        var diff_dirty_logs: map<string, string> = {}; // Unused in original
+        for ((key, value) in dirty_logs) {
+            // Check for existence and mismatch
+            if (exists(db, key) and value != db[key] and 
+                exists(is_committed, key) and is_committed[key] == true) {
+                
+                db[key] = value;
+                if (r != "Tail") {
+                    is_committed[key] = false;
+                    rpc_call(successor!, Write(key, value));
+                }
+            }
+        }
+    }
+
+    // Receiving clean logs from new successor
+    func BackPropagateCleanLogs(clean_logs: map<string, string>) -> () {
+        var diff_clean_logs: map<string, string> = {}; // Unused in original
+        for ((key, value) in clean_logs) {
+            // Check for existence and mismatch
+            if (exists(db, key) and value == db[key] and 
+                exists(is_committed, key) and is_committed[key] == false) {
+                
+                is_committed[key] = true;
+                if (r != "Head") {
+                    rpc_call(predecessor!, AckWrite(key, value));
+                }
+            }
+        }
+    }
+    
+    // New tail receiving full state from old tail
+    func PropagateLogsToTail(other_db: map<string, string>) -> () {
+        r = "Tail";
+        for ((key, value) in other_db) {
+            db[key] = value;
+            // Assuming the old tail's db is fully committed
+            is_committed[key] = true;
+        }
+    }
+}
+
+ClientInterface { 
+    
+    func read(dest: Node, key: string) -> string? {
+        // Client awaits the result of the read
+        var val: string? = @rpc_call(dest, Read(key));
+        return val;
+    }
+
+    func write(dest: Node, key: string, val: string) -> () {
+        // Client awaits the write to complete
+        @rpc_call(dest, Write(key, val));
+    }
+
+    func triggerFailover(dest: Node, failed_node: Node, new_tail: Node) -> () {
+        // Client awaits failover trigger
+        @rpc_call(dest, TriggerFailover(failed_node, new_tail));
+    }
+
+    func endFailover(dest: Node) -> () {
+        // Client awaits end of failover
+        @rpc_call(dest, EndFailover());
+    }
+
+    // Client init function, now passing Node? types
+    func init(dest: Node, name: string, pred: Node?, pred_pred: Node?, 
+              succ: Node?, succ_succ: Node?, hd: Node?, tl: Node?, 
+              s_node: Node?, data: map<string, string>) -> () {
+        
+        // Client awaits init to complete
+        @rpc_call(dest, Init(name, pred, pred_pred, succ, succ_succ, hd, tl, s_node, data));
+    }
+}

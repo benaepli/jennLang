@@ -66,6 +66,7 @@ type expr =
   | ECreatePromise
   | ECreateLock
   | ESome of expr
+  | EIntToString of expr
 [@@deriving ord]
 
 type lhs = LVar of string | LAccess of expr * expr | LTuple of string list
@@ -359,6 +360,7 @@ let rec to_string_expr (e : expr) : string =
   | ECreatePromise -> "ECreatePromise"
   | ECreateLock -> "ECreateLock"
   | ESome e -> "ESome(" ^ to_string_expr e ^ ")"
+  | EIntToString e -> "EIntToString(" ^ to_string_expr e ^ ")"
 
 let to_string_lhs (l : lhs) : string =
   match l with
@@ -834,6 +836,7 @@ else poll_for_response tl *)
   | ECreatePromise -> VFuture (ref None)
   | ECreateLock -> VLock (ref false)
   | ESome e -> VOption (Some (eval env e))
+  | EIntToString e -> VString (string_of_int (expect_int (eval env e)))
 
 let eval_lhs (env : record_env) (lhs : lhs) : lvalue =
   match lhs with

@@ -140,6 +140,7 @@ let rec expr_of_yojson json : expr =
           | [ e1; e2 ] -> ECoalesce (expr_of_yojson e1, expr_of_yojson e2)
           | _ -> failwith "ECoalesce expects 2 args")
       | "ESome" -> ESome (expr_of_yojson value)
+      | "EIntToString" -> EIntToString (expr_of_yojson value)
       | _ -> failwith ("Unknown expr key: " ^ key))
   (* Handle malformed JSON *)
   | _ ->

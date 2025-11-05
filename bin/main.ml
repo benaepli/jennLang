@@ -70,7 +70,7 @@ let bootlegged_sync_exec (global_state : state) (prog : program)
     (sever_all_to_tail_but_mid : bool) (partition_away_nodes : int list)
     (randomly_delay_msgs : bool) : unit =
   let count = ref 0 in
-  for _ = 0 to 1000 do
+  for _ = 0 to 100000 do
     if not (List.length global_state.records = 0) then (
       count := !count + 1;
       schedule_record global_state prog randomly_drop_msgs cut_tail_from_mid

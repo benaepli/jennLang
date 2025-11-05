@@ -378,9 +378,6 @@ def parseTrace(outfile):
             while f"Payload{i}" in row:
                 val = parse_json_value(row[f"Payload{i}"])
                 # We append None values as they are significant (e.g., VOption(None))
-                # The check for `val is not None` in the original file was
-                # likely to skip empty payload columns, which parse_json_value now does.
-                # We'll re-add it to be safe, assuming empty strings parse to None.
                 if val is not None:
                     payload_values.append(val)
                 i += 1
