@@ -51,7 +51,6 @@ role Node {
             db[key] = value;
             is_committed[key] = false;
             
-            // This is an async call; per hint, rpc_async_call is just rpc_call
             rpc_call(successor!, Write(key, value));
             
             // Wait for the write to be acknowledged up the chain
@@ -113,7 +112,6 @@ role Node {
                     clean_logs[key] = db[key];
                 }
             }
-            // This call should block
             @rpc_call(predecessor!, BackPropagateCleanLogs(clean_logs));
         }
 
@@ -131,7 +129,6 @@ role Node {
         inFailover = false;
     }
 
-    // --- Internal/Init Functions ---
 
     func Init(assigned_role: string, pred: Node?, pred_pred: Node?, 
               succ: Node?, succ_succ: Node?, h: Node?, t: Node?, 
@@ -215,21 +212,17 @@ ClientInterface {
     }
 
     func triggerFailover(dest: Node, failed_node: Node, new_tail: Node) -> () {
-        // Client awaits failover trigger
         @rpc_call(dest, TriggerFailover(failed_node, new_tail));
     }
 
     func endFailover(dest: Node) -> () {
-        // Client awaits end of failover
         @rpc_call(dest, EndFailover());
     }
 
-    // Client init function, now passing Node? types
     func init(dest: Node, name: string, pred: Node?, pred_pred: Node?, 
               succ: Node?, succ_succ: Node?, hd: Node?, tl: Node?, 
               s_node: Node?, data: map<string, string>) -> () {
         
-        // Client awaits init to complete
         @rpc_call(dest, Init(name, pred, pred_pred, succ, succ_succ, hd, tl, s_node, data));
     }
 }
