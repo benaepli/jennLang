@@ -6,3 +6,4 @@ output_dump/*
 .vscode
 output*.json
 output*.log
+.DS_Store
