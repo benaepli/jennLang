@@ -7,3 +7,4 @@ output_dump/*
 output*.json
 output*.log
 .DS_Store
+output*.html

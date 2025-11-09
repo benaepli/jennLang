@@ -1,3 +1,6 @@
 [submodule "spur"]
 	path = spur
 	url = https://github.com/benaepli/spur.git
+[submodule "porcupine"]
+	path = porcupine
+	url = https://github.com/benaepli/jennLang-porcupine
