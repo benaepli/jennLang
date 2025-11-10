@@ -68,9 +68,9 @@ let sync_exec (global_state : state) (prog : program)
 let bootlegged_sync_exec (global_state : state) (prog : program)
     (randomly_drop_msgs : bool) (cut_tail_from_mid : bool)
     (sever_all_to_tail_but_mid : bool) (partition_away_nodes : int list)
-    (randomly_delay_msgs : bool) : unit =
+    (randomly_delay_msgs : bool) (max_iterations : int) : unit =
   let count = ref 0 in
-  for _ = 0 to 100000 do
+  for _ = 0 to max_iterations do
     if not (List.length global_state.records = 0) then (
       count := !count + 1;
       schedule_record global_state prog randomly_drop_msgs cut_tail_from_mid
@@ -204,7 +204,7 @@ let rec schedule_random_op (global_state : state) (prog : program)
   in
 
   let op_name_suffix, actuals, on_response_hook =
-    if r < 0.00 then
+    if r < 0.01 then
       (* 1% chance of triggering a view change *)
       let target_node = Random.int num_servers in
       ("simulateTimeout", [ VNode target_node ], fun () -> ())
@@ -357,7 +357,7 @@ let init_nodes (global_state : state) (prog : program) : unit =
       done
 
 let interp (compiled_json : string) (intermediate_output : string)
-    (scheduler_config_json : string) : unit =
+    (scheduler_config_json : string) (max_iterations : int) : unit =
   let config = read_config_file scheduler_config_json in
   let randomly_drop_msgs = config.randomly_drop_msgs in
   let cut_tail_from_mid = config.cut_tail_from_mid in
@@ -375,29 +375,34 @@ let interp (compiled_json : string) (intermediate_output : string)
   start_random_client_loops global_state prog operation_id_counter;
 
   bootlegged_sync_exec global_state prog randomly_drop_msgs cut_tail_from_mid
-    sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs;
+    sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs
+    max_iterations;
   save_history_to_csv global_state.history intermediate_output;
   print_global_nodes global_state.nodes
 
-let handle_arguments () : string * string * string =
-  if Array.length Sys.argv < 4 then (
+let handle_arguments () : string * string * string * int =
+  if Array.length Sys.argv < 5 then (
     Printf.printf
-      "Usage: %s <compiled_json> <intermediate_output> <scheduler_config.json>\n"
+      "Usage: %s <compiled_json> <intermediate_output> <scheduler_config.json> \
+       <max_iterations>\n"
       Sys.argv.(0);
     exit 1)
   else
     let compiled_json = Sys.argv.(1) in
     let intermediate_output = Sys.argv.(2) in
     let scheduler_config_json = Sys.argv.(3) in
+    let max_iterations = int_of_string Sys.argv.(4) in
     Printf.printf
-      "Input JSON: %s, intermediate output: %s, scheduler_config_json: %s\n"
-      compiled_json intermediate_output scheduler_config_json;
-    (compiled_json, intermediate_output, scheduler_config_json)
+      "Input JSON: %s, intermediate output: %s, scheduler_config_json: %s, \
+       max_iterations: %d\n"
+      compiled_json intermediate_output scheduler_config_json max_iterations;
+    (compiled_json, intermediate_output, scheduler_config_json, max_iterations)
 
 let () =
-  let compiled_json, intermediate_output, scheduler_config_json =
+  let compiled_json, intermediate_output, scheduler_config_json, max_iterations
+      =
     handle_arguments ()
   in
-  interp compiled_json intermediate_output scheduler_config_json;
+  interp compiled_json intermediate_output scheduler_config_json max_iterations;
   print_endline "Compiled program loaded successfully!";
   print_endline "Program ran successfully!"

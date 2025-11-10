@@ -52,8 +52,8 @@ role Node {
     var prepare_ok_counts: map<int, int> = {};
     var prepare_buffer: map<int, PrepareMsg> = {};
 
-    var start_view_change_count: int = 0;
-    var do_view_change_count: int = 0;
+    var start_view_change_senders: map<Node, bool> = {};
+    var do_view_change_senders: map<Node, bool> = {};
     var do_view_change_messages: list<DoViewChangeMsg> = [];
     var recovery_response_count: int = 0;
 
@@ -124,6 +124,7 @@ role Node {
 
     func Prepare(other_view: int, other_request: Command, other_op_number: int, other_commit_number: int) {
         if (other_view != view_number) { return (); }
+        if (status != 0) { return (); }
         if (other_op_number <= op_number) { return (); }
         if (!exists(prepare_buffer, other_op_number)) {
             prepare_buffer[other_op_number] = PrepareMsg {
@@ -150,7 +151,7 @@ role Node {
 
     func PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
         var current_primary: Node = primary_of(view_number);
-        if (replicas[self] == current_primary and other_view == view_number) {
+        if (replicas[self] == current_primary and other_view == view_number and status == 0) {
             if (!exists(prepare_ok_counts, other_op_number)) {
                 prepare_ok_counts[other_op_number] = 0;
             }
@@ -168,7 +169,7 @@ role Node {
         }
     }
     func Commit(other_view: int, other_commit_number: int) {
-        if (other_view == view_number and other_commit_number > commit_number) {
+        if (other_view == view_number and status == 0 and other_commit_number > commit_number) {
             commit_number = other_commit_number;
             apply_committed_entries();
         }
@@ -177,11 +178,17 @@ role Node {
     sync func enter_view_change(new_view: int) {
         status = 1;
         view_number = new_view;
-        start_view_change_count = 1;
-        do_view_change_count = 0;
+        
+        start_view_change_senders = {};
+        start_view_change_senders[replicas[self]] = true; 
+        
+        do_view_change_senders = {};
         do_view_change_messages = [];
+
+        prepare_ok_counts = {};
+        prepare_buffer = {};
     }
-    
+
     sync func enter_normal_mode(v: int, new_log: list<LogEntry>, op_n: int, commit_n: int) {
         status = 0;
         view_number = v;
@@ -189,12 +196,17 @@ role Node {
         op_number = op_n;
         commit_number = commit_n;
         normal_view = v;
-        do_view_change_count = 0;
+
+        start_view_change_senders = {};
+        do_view_change_senders = {};
         do_view_change_messages = [];
         
-        kv_store = {};
-        applied_op_count = 0;
+        prepare_ok_counts = {};
+        prepare_buffer = {};
+        
+
         pending_requests = {}; 
+        
         apply_committed_entries();
     }
 
@@ -202,38 +214,56 @@ role Node {
         if (new_view > view_number) {
             enter_view_change(new_view);
             for (var i: int = 0; i < len(replicas); i = i + 1) {
-                 if (i != self) {
+                if (i != self) {
                     rpc_call(replicas[i], StartViewChange(view_number, replicas[self]));
-                 }
+                }
             }
         } elseif (new_view == view_number and status == 1) {
-            start_view_change_count = start_view_change_count + 1;
+            if (exists(start_view_change_senders, replica_id)) {
+                return (); // Already have a message from this sender
+            }
+            start_view_change_senders[replica_id] = true;
+            
             var f_val: int = (len(replicas) - 1) / 2;
             var quorum: int = f_val + 1;
-            if (start_view_change_count == quorum) {
+
+            if (len(start_view_change_senders) == quorum) {
                 var new_primary: Node = primary_of(view_number);
-                rpc_call(new_primary, DoViewChange(view_number, log, normal_view, op_number, commit_number));
+                
+                // Pass our own ID (replicas[self]) as the sender
+                rpc_call(new_primary, DoViewChange(view_number, log, normal_view, op_number, commit_number, replicas[self]));
             }
         }
     }
 
-    func DoViewChange(new_view: int, sender_log: list<LogEntry>, sender_normal_view: int, sender_op_number: int, sender_commit_number: int) {
+    func DoViewChange(new_view: int, sender_log: list<LogEntry>, sender_normal_view: int, sender_op_number: int, sender_commit_number: int, sender_id: Node) {
         var current_primary: Node = primary_of(new_view);
-        if (replicas[self] == current_primary and new_view == view_number) {
-            do_view_change_count = do_view_change_count + 1;
+        
+        if (replicas[self] == current_primary and new_view == view_number and status == 1) {
+            
+            if (exists(do_view_change_senders, sender_id)) {
+                return ();
+            }
+            do_view_change_senders[sender_id] = true;
+            
             do_view_change_messages = append(do_view_change_messages, DoViewChangeMsg{
                 log: sender_log,
                 normal_view: sender_normal_view,
                 op_number: sender_op_number,
                 commit_number: sender_commit_number
             });
+
             var quorum: int = f() + 1;
-            if (do_view_change_count == quorum) {
-                var best_log: list<LogEntry> = log;
-                var best_normal_view: int = normal_view;
-                var best_op_number: int = op_number;
-                var max_commit_number: int = commit_number;
-                for (var i: int = 0; i < len(do_view_change_messages); i = i + 1) {
+            
+            if (len(do_view_change_senders) == quorum) {
+                
+                var first_msg: DoViewChangeMsg = do_view_change_messages[0];
+                var best_log: list<LogEntry> = first_msg.log;
+                var best_normal_view: int = first_msg.normal_view;
+                var best_op_number: int = first_msg.op_number;
+                var max_commit_number: int = first_msg.commit_number;
+
+                for (var i: int = 1; i < len(do_view_change_messages); i = i + 1) { // Start from 1
                     var msg: DoViewChangeMsg = do_view_change_messages[i];
                     if (msg.normal_view > best_normal_view) {
                         best_normal_view = msg.normal_view;
@@ -254,6 +284,7 @@ role Node {
             }
         }
     }
+
     func StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
         if (new_view >= view_number) {
             enter_normal_mode(new_view, new_log, new_op_number, new_commit_number);
@@ -275,6 +306,17 @@ role Node {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) {
             // Not the primary. Return a failure/redirect response.
+            var p_err: promise<ClientResponse> = create_promise();
+            var resp: ClientResponse = ClientResponse{
+                is_primary: false,
+                key: nil,
+                value: nil,
+                primary: current_primary 
+            };
+            resolve_promise(p_err, resp); 
+            return create_future(p_err);
+        }
+        if (status != 0) {
             var p_err: promise<ClientResponse> = create_promise();
             var resp: ClientResponse = ClientResponse{
                 is_primary: false,
