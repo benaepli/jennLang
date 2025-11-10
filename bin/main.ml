@@ -91,7 +91,7 @@ let print_single_node (node : value Env.t) =
         Printf.printf "%s: %s\n" key (to_string_value value))
     node
 
-let print_global_nodes (nodes : value Env.t array) =
+let _print_global_nodes (nodes : value Env.t array) =
   Array.iter
     (fun node ->
       print_endline "Node has:";
@@ -220,7 +220,7 @@ let rec schedule_random_op (global_state : state) (prog : program)
 
       (* Create a hook to add the key to written_keys upon receiving response *)
       let hook () =
-        let _ = Printf.printf "Written key: %s\n" new_key in
+        (* let _ = Printf.printf "Written key: %s\n" new_key in *)
         written_keys := new_key :: !written_keys
       in
 
@@ -381,8 +381,8 @@ let interp (compiled_json : string) (intermediate_output : string)
   bootlegged_sync_exec global_state prog randomly_drop_msgs cut_tail_from_mid
     sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs
     max_iterations;
-  save_history_to_csv global_state.history intermediate_output;
-  print_global_nodes global_state.nodes
+  save_history_to_csv global_state.history intermediate_output
+(* print_global_nodes global_state.nodes *)
 
 let handle_arguments () : string * string * string * int =
   if Array.length Sys.argv < 5 then (

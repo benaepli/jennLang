@@ -985,12 +985,10 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
                 (fun (var_name, default_expr) ->
                   Env.add callee_env var_name (eval env default_expr))
                 locals;
-
               let callee_record_env =
                 { local_env = callee_env; node_env = env.node_env }
               in
               Env.add callee_record_env.local_env "self" (load "self" env);
-
               (* Pass 'self' *)
               let result = exec_sync program callee_record_env entry in
               store lhs result env
@@ -1020,7 +1018,7 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
               | other ->
                   failwith
                     (Printf.sprintf
-                       "Type error: Attempted to resolve %s (not a promise)"
+                       "Type error: Attempted to resolve \n%s (not a promise)"
                        (type_name other))))
       | Cond (cond, bthen, belse) -> (
           match eval env cond with
@@ -1028,18 +1026,78 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
           | VBool false -> current_pc := belse
           | other ->
               failwith
-                (Printf.sprintf "Type error in sync cond: expected bool, got %s"
+                (Printf.sprintf
+                   "Type error in sync cond: expected \nbool, got %s"
                    (type_name other)))
       | Return expr -> raise (SyncReturn (eval env expr))
       | Print (expr, next) ->
           Printf.printf "%s\n" (to_string_value (eval env expr));
           current_pc := next
-      | Break target_vertex ->
-          (* A 'break' in a sync context is just a jump *)
-          current_pc := target_vertex
-      | ForLoopIn (_, _, _, _) ->
-          failwith
-            "Runtime Error: 'for..in' loop cannot be used in a 'sync' function"
+      | Break target_vertex -> current_pc := target_vertex
+      | ForLoopIn (lhs, expr, body, next) -> (
+          match eval env expr with
+          | VMap map -> (
+              if ValueMap.length map == 0 then current_pc := next
+              else
+                let single_pair =
+                  let result_ref = ref None in
+
+                  ValueMap.iter
+                    (fun key value ->
+                      match !result_ref with
+                      | Some _ -> ()
+                      | None -> result_ref := Some (key, value))
+                    map;
+                  !result_ref
+                in
+                ValueMap.remove map (fst (Option.get single_pair));
+                store (LVar "local_copy") (VMap map) env;
+
+                match lhs with
+                | LTuple [ key; value ] ->
+                    let k, v = Option.get single_pair in
+                    Env.add env.local_env key k;
+                    Env.add env.local_env value v;
+                    current_pc := body
+                | _ ->
+                    Printf.printf "failed to iterate map with lhs: %s\n"
+                      (to_string_lhs lhs);
+                    failwith
+                      "Cannot iterate through map with anything other than a \
+                       2-tuple")
+          | VList list_ref -> (
+              if List.length !list_ref == 0 then current_pc := next
+              else
+                let removed_item =
+                  let result_ref = ref None in
+                  List.iter
+                    (fun item ->
+                      match !result_ref with
+                      | Some _ -> ()
+                      | None -> result_ref := Some item)
+                    !list_ref;
+
+                  !result_ref
+                in
+                list_ref :=
+                  List.filter (fun x -> x <> Option.get removed_item) !list_ref;
+                store (LVar "local_copy") (VList list_ref) env;
+                match lhs with
+                | LVar var ->
+                    Env.add env.local_env var (Option.get removed_item);
+                    current_pc := body
+                | _ ->
+                    Printf.printf "failed to iterate list with lhs %s\n"
+                      (to_string_lhs lhs);
+                    failwith
+                      "Cannot iterate through list with anything other than a \
+                       single variable")
+          | other ->
+              Printf.printf "failed to iterate collection: %s\n"
+                (to_string_expr expr);
+              failwith
+                (Printf.sprintf "ForLoopIn on %s (not a collection)"
+                   (type_name other)))
       | Lock (_, _) | Unlock (_, _) ->
           failwith
             "Runtime Error: 'lock'/'unlock' cannot be used in a 'sync' function"
@@ -1047,7 +1105,7 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
           failwith
             "Runtime Error: Async operation (Pause, Await) in 'sync' function"
     done;
-    VUnit (* Unreachable *)
+    VUnit
   with SyncReturn v -> v
 
 (* Execute record until pause/return.  Invariant: record does *not* belong to

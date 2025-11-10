@@ -57,9 +57,6 @@ role Node {
     var do_view_change_messages: list<DoViewChangeMsg> = [];
     var recovery_response_count: int = 0;
 
-    var commands: list<Command> = [];
-    var keys: list<string> = [];
-
     
     func Init(me: int, peers: list<Node>) {
         self = me;
@@ -87,23 +84,17 @@ role Node {
             var cmd: Command = entry.op;
             
             var result: string? = nil;
-              println("Command");
-                println(cmd.key);
 
             if (cmd.kind == 1) { // Write
                 kv_store[cmd.key] = cmd.value!;
-                println("Here");
-                println(cmd.key);
-                println(kv_store[cmd.key]);
             } elseif (cmd.kind == 0) { // Read
                 if (exists(kv_store, cmd.key)) {
                     result = kv_store[cmd.key];
                 } else {
-                    println("Impossible?");
-                    println(cmd.key);
+                    println("Impossible 1.");
                 }
             } else {
-                println("Impossible");
+                println("Impossible 2.");
             }
 
             if (exists(pending_requests, op_n)) {
@@ -178,6 +169,19 @@ role Node {
     sync func enter_view_change(new_view: int) {
         status = 1;
         view_number = new_view;
+
+        var new_primary: Node = primary_of(new_view);
+        var resp: ClientResponse = ClientResponse{
+            is_primary: false,
+            key: nil,
+            value: nil,
+            primary: new_primary 
+        };
+
+        for ((op_n, p) in pending_requests) {
+            resolve_promise(p, resp);
+        }
+        pending_requests = {};
         
         start_view_change_senders = {};
         start_view_change_senders[replicas[self]] = true; 
@@ -204,7 +208,16 @@ role Node {
         prepare_ok_counts = {};
         prepare_buffer = {};
         
-
+        var new_primary: Node = primary_of(v);
+        var resp: ClientResponse = ClientResponse{
+            is_primary: false,
+            key: nil,
+            value: nil,
+            primary: new_primary 
+        };
+        for ((op_n, p) in pending_requests) {
+            resolve_promise(p, resp);
+        }
         pending_requests = {}; 
         
         apply_committed_entries();
@@ -354,9 +367,7 @@ role Node {
 
     // Accepts a new Write command from a client.
     func Write(key: string, value: string) -> ClientResponse {
-        keys = append(keys, key);
         var cmd: Command = Command{ kind: 1, key: key, value: value };
-        commands = append(commands, cmd);
         var response: future<ClientResponse> = @NewEntry(cmd);
         return await response;
     }
@@ -365,7 +376,6 @@ role Node {
     func Read(key: string) -> ClientResponse {
         // A Read is also a log entry to ensure linearizability
         var cmd: Command = Command{ kind: 0, key: key, value: nil };
-        commands = append(commands, cmd);
         return @@NewEntry(cmd);
     }
 
@@ -413,12 +423,9 @@ ClientInterface {
             var resp: ClientResponse = @rpc_call(current_target, Write(key, value));
             
             if (resp.is_primary == true) {
-                println("Written");
-                println(key);
                 responses = append(responses, (resp, key));
                 return ();
             }
-            println("Client redirected for write");
             current_target = resp.primary;
         }
     }
@@ -431,8 +438,6 @@ ClientInterface {
             var resp: ClientResponse = @rpc_call(current_target, Read(key));
 
             if (resp.is_primary == true) {
-                println("Read key");
-                println(key);
                 return resp.value;
             }
             current_target = resp.primary;
