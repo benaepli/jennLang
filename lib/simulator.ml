@@ -93,12 +93,17 @@ module rec Value : sig
     | VMap of t ValueMap.t
     | VList of t list ref
     | VOption of t option
-    | VFuture of t option ref
+    | VFuture of future_value
     | VLock of bool ref
     | VNode of int
     | VString of string
     | VUnit
     | VTuple of t array
+
+  and future_value = {
+    mutable value : t option;
+    mutable waiters : (t -> unit) list;
+  }
 end = struct
   type t =
     | VInt of int
@@ -106,12 +111,17 @@ end = struct
     | VMap of t ValueMap.t
     | VList of t list ref
     | VOption of t option
-    | VFuture of t option ref
+    | VFuture of future_value
     | VLock of bool ref
     | VNode of int
     | VString of string
     | VUnit
     | VTuple of t array
+
+  and future_value = {
+    mutable value : t option;
+    mutable waiters : (t -> unit) list;
+  }
 end
 
 and ValueKey : sig
@@ -169,12 +179,17 @@ type value = Value.t =
   | VMap of value ValueMap.t
   | VList of value list ref
   | VOption of value option
-  | VFuture of value option ref
+  | VFuture of Value.future_value
   | VLock of bool ref
   | VNode of int
   | VString of string
   | VUnit
   | VTuple of value array
+
+type future_value = Value.future_value = {
+  mutable value : value option;
+  mutable waiters : (value -> unit) list;
+}
 
 (* Get a human-readable type name for error messages *)
 let type_name = function
@@ -414,10 +429,10 @@ let rec to_string_value (v : value) : string =
       "VOption("
       ^ (match o with Some v -> to_string_value v | None -> "None")
       ^ ")"
-  | VFuture f ->
-      "VFuture("
-      ^ (match !f with Some v -> to_string_value v | None -> "None")
-      ^ ")"
+  | VFuture fut -> (
+      match fut.value with
+      | None -> "Future(pending)"
+      | Some v -> "Future(" ^ to_string_value v ^ ")")
   | VLock r -> "VLock(" ^ string_of_bool !r ^ ")"
   | VNode n -> "VNode(" ^ string_of_int n ^ ")"
   | VString s -> "" ^ s ^ ""
@@ -498,7 +513,8 @@ type operation = {
 (* Global state *)
 type state = {
   nodes : value Env.t array;
-  mutable records : record list;
+  mutable runnable_records : record list;
+  mutable waiting_records : record list;
   history : operation DA.t;
   mutable free_clients :
     int list (* client ids should be valid indexes into nodes *);
@@ -533,6 +549,14 @@ let load (var : string) (env : record_env) : value =
     with Not_found ->
       Printf.printf "load fail: %s\n" var;
       failwith "Variable not found")
+
+(* Helper to wake up records waiting on a future *)
+let wake_waiters (fut : future_value) : unit =
+  match fut.value with
+  | Some value ->
+      List.iter (fun callback -> callback value) fut.waiters;
+      fut.waiters <- []
+  | None -> failwith "Cannot wake waiters on unresolved future"
 
 (* Evaluate an expression in the context of an environment. *)
 let rec eval (env : record_env) (expr : expr) : value =
@@ -709,11 +733,10 @@ let rec eval (env : record_env) (expr : expr) : value =
                 | [] -> 0
                 | hd :: tl -> (
                     match hd with
-                    | VFuture fut -> (
+                    (* | VFuture fut -> (
                         match !fut with
-                        (* | Some v -> if (v = eval env e2) then 1 + poll_for_response tl else poll_for_response tl *)
                         | Some _ -> 1 + poll_for_response tl
-                        | None -> poll_for_response tl)
+                        | None -> poll_for_response tl) *)
                     | VBool b -> (
                         match b with
                         | true -> 1 + poll_for_response tl
@@ -730,12 +753,10 @@ let rec eval (env : record_env) (expr : expr) : value =
             | [] -> 0
             | hd :: tl -> (
                 match hd with
-                | VFuture fut -> (
+                (* | VFuture fut -> (
                     match !fut with
-                    (* | Some v -> if (v = eval env e2) then 1 + poll_for_response tl 
-else poll_for_response tl *)
                     | Some _ -> 1 + poll_for_response tl
-                    | None -> poll_for_response tl)
+                    | None -> poll_for_response tl) *)
                 | VBool b -> (
                     match b with
                     | true -> 1 + poll_for_response tl
@@ -760,10 +781,10 @@ else poll_for_response tl *)
                 | [] -> failwith "Polling for response on empty list"
                 | hd :: tl -> (
                     match hd with
-                    | VFuture fut -> (
+                    (* | VFuture fut -> (
                         match !fut with
                         | Some _ -> true
-                        | None -> poll_for_response tl)
+                        | None -> poll_for_response tl) *)
                     | VBool b -> (
                         match b with
                         | true -> true
@@ -780,10 +801,10 @@ else poll_for_response tl *)
             | [] -> false
             | hd :: tl -> (
                 match hd with
-                | VFuture fut -> (
+                (* | VFuture fut -> (
                     match !fut with
                     | Some _ -> true
-                    | None -> poll_for_response tl)
+                    | None -> poll_for_response tl) *)
                 | VBool b -> (
                     match b with true -> true | false -> poll_for_response tl)
                 | _ ->
@@ -805,9 +826,10 @@ else poll_for_response tl *)
             let key, value = hd in
             match value with
             | VFuture fut -> (
-                match !fut with
+                match fut.value with
                 | Some v ->
-                    ValueMap.replace m key (VFuture (ref None));
+                    ValueMap.replace m key
+                      (VFuture { value = None; waiters = [] });
                     v
                 | None -> nxt_resp tl)
             | _ -> failwith "ENextResp on non-future")
@@ -833,7 +855,7 @@ else poll_for_response tl *)
       match expect_option (eval env e_opt) with
       | Some v -> v
       | None -> eval env e_default)
-  | ECreatePromise -> VFuture (ref None)
+  | ECreatePromise -> VFuture { value = None; waiters = [] }
   | ECreateLock -> VLock (ref false)
   | ESome e -> VOption (Some (eval env e))
   | EIntToString e -> VString (string_of_int (expect_int (eval env e)))
@@ -988,7 +1010,9 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
               in
               match promise_val with
               | VFuture r ->
-                  if !r = None then r := Some value_to_resolve
+                  if r.value = None then (
+                    r.value <- Some value_to_resolve;
+                    wake_waiters r)
                   else
                     failwith
                       ("Runtime error: Promise already resolved at "
@@ -1039,7 +1063,7 @@ let exec (state : state) (program : program) (record : record) =
         | Async (lhs, node, func, actuals) -> (
             match eval env node with
             | VNode node_id | VInt node_id ->
-                let new_future = ref None in
+                let new_future = { value = None; waiters = [] } in
                 let { entry; formals; locals; _ } =
                   function_info func program
                 in
@@ -1066,7 +1090,10 @@ let exec (state : state) (program : program) (record : record) =
                   {
                     node = node_id;
                     pc = entry;
-                    continuation = (fun value -> new_future := Some value);
+                    continuation =
+                      (fun value ->
+                        new_future.value <- Some value;
+                        wake_waiters new_future);
                     env = new_env;
                     id = record.id;
                     x = record.x;
@@ -1074,13 +1101,12 @@ let exec (state : state) (program : program) (record : record) =
                   }
                 in
                 store lhs (VFuture new_future) env;
-                state.records <- new_record :: state.records
+                state.runnable_records <- new_record :: state.runnable_records
             | VString role -> (
                 match load role env with
                 | VNode node_id ->
-                    let new_future = ref None in
+                    let new_future = { value = None; waiters = [] } in
                     let { entry; formals; _ } = function_info func program in
-
                     let new_env = Env.create 1024 in
                     List.iter2
                       (fun formal actual ->
@@ -1090,16 +1116,19 @@ let exec (state : state) (program : program) (record : record) =
                       {
                         node = node_id;
                         pc = entry;
-                        continuation = (fun value -> new_future := Some value);
+                        continuation =
+                          (fun value ->
+                            new_future.value <- Some value;
+                            wake_waiters new_future);
                         env = new_env;
                         id = record.id;
                         x = record.x;
                         f = record.f;
                       }
                     in
-
                     store lhs (VFuture new_future) env;
-                    state.records <- new_record :: state.records
+                    state.runnable_records <-
+                      new_record :: state.runnable_records
                 | other ->
                     failwith
                       (Printf.sprintf
@@ -1164,17 +1193,19 @@ let exec (state : state) (program : program) (record : record) =
                    ^ to_string_lhs lhs)
             in
             match promise_val with
-            | VFuture r ->
-                if !r = None then r := Some value_to_resolve
+            | VFuture fut ->
+                if fut.value = None then (
+                  fut.value <- Some value_to_resolve;
+                  wake_waiters fut)
                 else
                   failwith
-                    ("Runtime error: Promise at " ^ to_string_lhs lhs
-                   ^ " already resolved")
+                    ("Runtime error: Promise already resolved at "
+                   ^ to_string_lhs lhs)
             | other ->
                 failwith
                   (Printf.sprintf
-                     "Type error: Attempted to resolve %s (not a promise) at %s"
-                     (type_name other) (to_string_lhs lhs))));
+                     "Type error: Attempted to resolve %s (not a promise)"
+                     (type_name other))));
         loop ()
     | Cond (cond, bthen, belse) ->
         (match eval env cond with
@@ -1188,17 +1219,19 @@ let exec (state : state) (program : program) (record : record) =
     | Await (lhs, expr, next) -> (
         match eval env expr with
         | VFuture fut -> (
-            match !fut with
+            match fut.value with
             | Some value ->
                 record.pc <- next;
                 store lhs value env;
                 loop ()
             | None ->
-                (* Still waiting.  TODO: should keep blocked records in a
-                 different data structure to avoid scheduling records that
-                 can't 
-do any work. *)
-                state.records <- record :: state.records)
+                let resume_callback value =
+                  record.pc <- next;
+                  store lhs value env;
+                  state.runnable_records <- record :: state.runnable_records
+                in
+                fut.waiters <- resume_callback :: fut.waiters;
+                state.waiting_records <- record :: state.waiting_records)
         | other ->
             failwith
               (Printf.sprintf "Type error in await: expected future, got %s"
@@ -1211,7 +1244,7 @@ do any work. *)
               loop ())
             else
               (* Still waiting. *)
-              state.records <- record :: state.records
+              state.runnable_records <- record :: state.runnable_records
         | other ->
             failwith
               (Printf.sprintf "Type error in SpinAwait: expected bool, got %s"
@@ -1219,7 +1252,7 @@ do any work. *)
     | Return expr -> record.continuation (eval env expr)
     | Pause next ->
         record.pc <- next;
-        state.records <- record :: state.records
+        state.runnable_records <- record :: state.runnable_records
     | ForLoopIn (lhs, expr, body, next) -> (
         match eval env expr with
         | VMap map -> (
@@ -1312,7 +1345,7 @@ do any work. *)
           loop ())
         else
           (* Lock is held, re-queue the record to wait *)
-          state.records <- record :: state.records
+          state.runnable_records <- record :: state.runnable_records
     | Unlock (lock_expr, next) ->
         let lock_ref = expect_lock (eval env lock_expr) in
         if !lock_ref = true then (
@@ -1340,7 +1373,7 @@ let schedule_record (state : state) (program : program)
     | r :: rs ->
         if n == 0 then (
           let env = { local_env = r.env; node_env = state.nodes.(r.node) } in
-          state.records <- List.rev_append before rs;
+          state.runnable_records <- List.rev_append before rs;
           match CFG.label program.cfg r.pc with
           | Instr (i, _) -> (
               match i with
@@ -1391,10 +1424,10 @@ let schedule_record (state : state) (program : program)
   in
   let idx =
     Random.self_init ();
-    Random.int (List.length state.records)
+    Random.int (List.length state.runnable_records)
   in
   let chosen_idx = idx in
-  pick chosen_idx [] state.records
+  pick chosen_idx [] state.runnable_records
 
 (* Helper function to schedule a thread *)
 let schedule_thread (state : state) (program : program) (func_name : string)
@@ -1457,7 +1490,7 @@ let schedule_thread (state : state) (program : program) (func_name : string)
           in
           update_free_threads (List.rev_append before cs);
           DA.add state.history invocation;
-          state.records <- record :: state.records)
+          state.runnable_records <- record :: state.runnable_records)
         else pick (n - 1) (c :: before) cs
   in
   pick

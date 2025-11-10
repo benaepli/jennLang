@@ -9,7 +9,7 @@ let rec json_of_value (v : value) : Yojson.Basic.t =
   | VNode n -> `Assoc [ ("type", `String "VNode"); ("value", `Int n) ]
   | VFuture f ->
       let value_json =
-        match !f with Some v -> json_of_value v | None -> `Null
+        match f.value with Some v -> json_of_value v | None -> `Null
       in
       `Assoc [ ("type", `String "VFuture"); ("value", value_json) ]
   | VMap m ->

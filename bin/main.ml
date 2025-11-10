@@ -49,7 +49,8 @@ let global_state =
       Array.init
         (num_servers + num_clients + num_sys_threads)
         (fun _ -> Env.create 1024);
-    records = [];
+    runnable_records = [];
+    waiting_records = [];
     history = DA.create ();
     free_clients = List.init num_clients (fun i -> num_servers + i);
     free_sys_threads =
@@ -60,7 +61,7 @@ let sync_exec (global_state : state) (prog : program)
     (randomly_drop_msgs : bool) (cut_tail_from_mid : bool)
     (sever_all_to_tail_but_mid : bool) (partition_away_nodes : int list)
     (randomly_delay_msgs : bool) : unit =
-  while not (List.length global_state.records = 0) do
+  while not (List.length global_state.runnable_records = 0) do
     schedule_record global_state prog randomly_drop_msgs cut_tail_from_mid
       sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs
   done
@@ -71,13 +72,16 @@ let bootlegged_sync_exec (global_state : state) (prog : program)
     (randomly_delay_msgs : bool) (max_iterations : int) : unit =
   let count = ref 0 in
   for _ = 0 to max_iterations do
-    if not (List.length global_state.records = 0) then (
+    if not (List.length global_state.runnable_records = 0) then (
       count := !count + 1;
       schedule_record global_state prog randomly_drop_msgs cut_tail_from_mid
         sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs)
   done;
   Printf.printf "Executed %d record scheduling iterations\n" !count;
-  Printf.printf "Remaining records: %d\n" (List.length global_state.records)
+  Printf.printf "Remaining runnable records: %d\n"
+    (List.length global_state.runnable_records);
+  Printf.printf "Waiting records: %d\n"
+    (List.length global_state.waiting_records)
 
 let print_single_node (node : value Env.t) =
   Env.iter
@@ -285,7 +289,7 @@ let rec schedule_random_op (global_state : state) (prog : program)
       f = (fun x -> x /. 2.0);
     }
   in
-  global_state.records <- record :: global_state.records
+  global_state.runnable_records <- record :: global_state.runnable_records
 
 let start_random_client_loops (global_state : state) (prog : program)
     (operation_id_counter : int ref) : unit =
@@ -318,7 +322,7 @@ let init_clients (global_state : state) (prog : program) : unit =
         f = (fun x -> x);
       }
     in
-    global_state.records <- [ record ];
+    global_state.runnable_records <- [ record ];
     sync_exec global_state prog false false false [] false
   done
 
@@ -352,7 +356,7 @@ let init_nodes (global_state : state) (prog : program) : unit =
           }
         in
         (* Add the record and run it to initialize the node's state *)
-        global_state.records <- record :: global_state.records;
+        global_state.runnable_records <- record :: global_state.runnable_records;
         sync_exec global_state prog false false false [] false
       done
 
