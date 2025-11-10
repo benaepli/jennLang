@@ -3,6 +3,9 @@ open Mylib.Loader
 open Mylib.History
 open Yojson.Basic.Util
 
+(* Include the benchmark module *)
+module Benchmark = Benchmark
+
 type config = {
   randomly_drop_msgs : bool;
   cut_tail_from_mid : bool;
@@ -43,7 +46,8 @@ let data () : value ValueMap.t =
 
 let mod_op (i : int) (m : int) : int = if i < 0 then i + m else i mod m
 
-let global_state =
+(** Create a fresh global state for each benchmark run *)
+let create_fresh_global_state () : state =
   {
     nodes =
       Array.init
@@ -360,6 +364,7 @@ let init_nodes (global_state : state) (prog : program) : unit =
         sync_exec global_state prog false false false [] false
       done
 
+(** Main interpreter function - runs a single simulation *)
 let interp (compiled_json : string) (intermediate_output : string)
     (scheduler_config_json : string) (max_iterations : int) : unit =
   let config = read_config_file scheduler_config_json in
@@ -369,22 +374,26 @@ let interp (compiled_json : string) (intermediate_output : string)
   let partition_away_nodes = config.partition_away_nodes in
   let randomly_delay_msgs = config.randomly_delay_msgs in
 
+  (* Create a fresh global state for this run *)
+  let fresh_state = create_fresh_global_state () in
+
   (* Load the program from the compiled JSON file *)
   let prog = load_program_from_file compiled_json in
   let operation_id_counter = ref 0 in
-  init_clients global_state prog;
-  init_nodes global_state prog;
-  init_topology topology global_state prog operation_id_counter;
-  (* schedule_vr_executions global_state prog operation_id_counter; *)
-  start_random_client_loops global_state prog operation_id_counter;
+  init_clients fresh_state prog;
+  init_nodes fresh_state prog;
+  init_topology topology fresh_state prog operation_id_counter;
+  (* schedule_vr_executions fresh_state prog operation_id_counter; *)
+  start_random_client_loops fresh_state prog operation_id_counter;
 
-  bootlegged_sync_exec global_state prog randomly_drop_msgs cut_tail_from_mid
+  bootlegged_sync_exec fresh_state prog randomly_drop_msgs cut_tail_from_mid
     sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs
     max_iterations;
-  save_history_to_csv global_state.history intermediate_output
-(* print_global_nodes global_state.nodes *)
+  save_history_to_csv fresh_state.history intermediate_output
+(* print_global_nodes fresh_state.nodes *)
 
-let handle_arguments () : string * string * string * int =
+(** Handle normal execution mode arguments *)
+let handle_normal_arguments () : string * string * string * int =
   if Array.length Sys.argv < 5 then (
     Printf.printf
       "Usage: %s <compiled_json> <intermediate_output> <scheduler_config.json> \
@@ -402,11 +411,41 @@ let handle_arguments () : string * string * string * int =
       compiled_json intermediate_output scheduler_config_json max_iterations;
     (compiled_json, intermediate_output, scheduler_config_json, max_iterations)
 
+(** Print usage information *)
+let print_usage () : unit =
+  Printf.printf "Usage:\n\n";
+  Printf.printf "Normal Mode:\n";
+  Printf.printf
+    "  %s <compiled_json> <intermediate_output> <scheduler_config.json> \
+     <max_iterations>\n\n"
+    Sys.argv.(0);
+  Benchmark.print_usage ()
+
+(** Main entry point *)
 let () =
-  let compiled_json, intermediate_output, scheduler_config_json, max_iterations
-      =
-    handle_arguments ()
-  in
-  interp compiled_json intermediate_output scheduler_config_json max_iterations;
-  print_endline "Compiled program loaded successfully!";
-  print_endline "Program ran successfully!"
+  (* Check if we're in benchmark mode *)
+  if Array.length Sys.argv >= 2 && Sys.argv.(1) = "benchmark" then
+    (* Benchmark mode *)
+    match Benchmark.parse_benchmark_args () with
+    | Some config ->
+        let _stats = Benchmark.run_benchmark config interp in
+        ()
+    | None -> exit 1
+  else if
+    Array.length Sys.argv >= 2
+    && (Sys.argv.(1) = "-h" || Sys.argv.(1) = "--help")
+  then (
+    print_usage ();
+    exit 0)
+  else
+    (* Normal execution mode *)
+    let ( compiled_json,
+          intermediate_output,
+          scheduler_config_json,
+          max_iterations ) =
+      handle_normal_arguments ()
+    in
+    interp compiled_json intermediate_output scheduler_config_json
+      max_iterations;
+    print_endline "Compiled program loaded successfully!";
+    print_endline "Program ran successfully!"

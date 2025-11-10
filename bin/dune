@@ -1,4 +1,5 @@
 (executable
  (name main)
+ (public_name main)
  (libraries yojson mylib)
- (modules main))
+ (modules main benchmark))

@@ -41,7 +41,7 @@ def run_benchmark(
             str(max_iterations),
         ]
 
-        print(f"Running iteration {i+1}/{num_runs}...", end=" ", flush=True)
+        # print(f"Running iteration {i+1}/{num_runs}...", end=" ", flush=True)
 
         start_time = time.perf_counter()
 
@@ -57,7 +57,7 @@ def run_benchmark(
             end_time = time.perf_counter()
             elapsed = end_time - start_time
             run_times.append(elapsed)
-            print(f"Success ({elapsed:.4f}s)")
+            # print(f"Success ({elapsed:.4f}s)")
 
         except subprocess.CalledProcessError as e:
             print(f"FAILED!")
@@ -107,9 +107,9 @@ def print_summary(run_times: list[float]):
         print(f"  Max Time:     {max_time:.4f}s")
         print(f"  Std. Dev:     {std_dev:.4f}s")
 
-    print("\nAll Run Times (s):")
-    for i, t in enumerate(run_times, 1):
-        print(f"  Run {i}: {t:.4f}s")
+    # print("\nAll Run Times (s):")
+    # for i, t in enumerate(run_times, 1):
+    #     print(f"  Run {i}: {t:.4f}s")
 
 
 def main():
