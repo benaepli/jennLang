@@ -411,12 +411,12 @@ ClientInterface {
     var responses: list<(ClientResponse, string)> = [];
 
     // Initializes a replica node.
-    func init(dest: int, replicas: list<Node>) {
+    func Init(dest: int, replicas: list<Node>) {
         @rpc_call(replicas[dest], Init(dest, replicas));
     }
 
     // Sends a new write command to a specific replica, retrying on redirect.
-    func write(dest: Node, key: string, value: string) {
+    func Write(dest: Node, key: string, value: string) {
         var current_target: Node = dest;
 
         for (;;) {
@@ -431,7 +431,7 @@ ClientInterface {
     }
 
     // Sends a new read command to a specific replica, retrying on redirect.
-    func read(dest: Node, key: string) -> string? {
+    func Read(dest: Node, key: string) -> string? {
         var current_target: Node = dest;
 
         for (;;) {
@@ -447,12 +447,12 @@ ClientInterface {
     }
 
     // Gets the entire KV store from a replica (for debugging/testing).
-    func getKVStore(dest: Node) -> map<string, string> {
+    func GetKVStore(dest: Node) -> map<string, string> {
         return @rpc_call(dest, GetKVStore());
     }
 
     // Triggers a simulated timeout at the destination node.
-    func simulateTimeout(dest: Node) {
+    func SimulateTimeout(dest: Node) {
         rpc_call(dest, SimulateTimeout());
     }
 }

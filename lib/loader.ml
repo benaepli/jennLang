@@ -250,27 +250,15 @@ let function_info_of_yojson json : function_info =
   }
 
 let program_of_yojson json : program =
-  (* 1. Parse the CFG (a list of labels) into a BatDynArray *)
   let cfg_list = member "cfg" json |> to_list |> List.map label_of_yojson in
   let cfg_array = BatDynArray.of_list cfg_list in
-
-  (* 2. Parse the RPC map (a JSON object) into an OCaml Hashtbl *)
   let rpc_hashtbl = Env.create (List.length (to_assoc (member "rpc" json))) in
   List.iter
     (fun (key, info_json) ->
       Env.add rpc_hashtbl key (function_info_of_yojson info_json))
     (to_assoc (member "rpc" json));
 
-  (* 3. Parse the client_ops map (a JSON object) into an OCaml Hashtbl *)
-  let client_ops_hashtbl =
-    Env.create (List.length (to_assoc (member "client_ops" json)))
-  in
-  List.iter
-    (fun (key, info_json) ->
-      Env.add client_ops_hashtbl key (function_info_of_yojson info_json))
-    (to_assoc (member "client_ops" json));
-
-  { cfg = cfg_array; rpc = rpc_hashtbl; client_ops = client_ops_hashtbl }
+  { cfg = cfg_array; rpc = rpc_hashtbl }
 
 (**
  * Loads a compiled program from a JSON file.

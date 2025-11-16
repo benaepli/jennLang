@@ -510,6 +510,13 @@ type operation = {
   unique_id : int;
 }
 
+type crash_info = {
+  mutable currently_crashed : int list;
+  mutable recovery_schedule : (int * int) list; (* (node_id, recover_at_step) *)
+  mutable current_step : int;
+  mutable queued_messages : (int * record) list;
+}
+
 (* Global state *)
 type state = {
   nodes : value Env.t array;
@@ -519,6 +526,7 @@ type state = {
   mutable free_clients :
     int list (* client ids should be valid indexes into nodes *);
   mutable free_sys_threads : int list (* internal systems threads *);
+  crash_info : crash_info;
 }
 
 (* Execution environment of an activation record: local variables +
@@ -538,7 +546,6 @@ type program = {
   cfg : CFG.t;
   (* jenndbg this is its control flow *)
   rpc : function_info Env.t;
-  client_ops : function_info Env.t;
 }
 (* jenndbg why does an RPC handler need a list of function info *)
 
@@ -915,11 +922,9 @@ let copy (lhs : lhs) (vl : value) (env : record_env) : unit =
 
 let function_info name program =
   try Env.find program.rpc name
-  with Not_found -> (
-    try Env.find program.client_ops name
-    with Not_found ->
-      Printf.printf "function %s is not defined in rpc or client_ops\n" name;
-      failwith "Function not found")
+  with Not_found ->
+    Printf.printf "function %s is not defined in program.functions\n" name;
+    failwith "Function not found"
 
 let create_rpc_record node_id func actuals env program record =
   let { entry; formals; locals; _ } = function_info func program in
@@ -1429,7 +1434,11 @@ let schedule_record (state : state) (program : program)
     match after with
     | [] -> raise Halt
     | r :: rs ->
-        if n == 0 then (
+        (* Skip if sender node is crashed *)
+        if List.mem r.node state.crash_info.currently_crashed then
+          (* Don't execute - node is crashed, just remove from queue *)
+          state.runnable_records <- List.rev_append before rs
+        else if n == 0 then (
           let env = { local_env = r.env; node_env = state.nodes.(r.node) } in
           state.runnable_records <- List.rev_append before rs;
           match CFG.label program.cfg r.pc with
@@ -1439,43 +1448,52 @@ let schedule_record (state : state) (program : program)
                   let node_id = expect_node (eval env node) in
                   let src_node = r.node in
                   let dest_node = node_id in
-                  let should_execute = ref true in
 
-                  (* Only apply fault injection to non-local calls *)
-                  if src_node <> dest_node then (
-                    if
-                      randomly_drop_msgs
-                      &&
-                      (Random.self_init ();
-                       Random.float 1.0 < 0.3)
-                    then should_execute := false;
+                  (* If destination is crashed, queue the message *)
+                  if List.mem dest_node state.crash_info.currently_crashed then (
+                    Printf.printf
+                      "  Queueing message from %d to crashed node %d (step %d)\n"
+                      src_node dest_node state.crash_info.current_step;
+                    state.crash_info.queued_messages <-
+                      (dest_node, r) :: state.crash_info.queued_messages)
+                  else
+                    let should_execute = ref true in
 
-                    if
-                      cut_tail_from_mid
-                      && ((src_node = 2 && dest_node = 1)
-                         || (dest_node = 2 && src_node = 1))
-                    then should_execute := false;
-
-                    if sever_all_but_mid then
-                      if dest_node = 2 && not (src_node = 1) then
-                        should_execute := false
-                      else if src_node = 2 && not (dest_node = 1) then
-                        should_execute := false;
-
-                    if
-                      List.mem src_node partition_away_nodes
-                      || List.mem dest_node partition_away_nodes
-                    then should_execute := false;
-
-                    if randomly_delay_msgs then
+                    (* Only apply fault injection to non-local calls *)
+                    if src_node <> dest_node then (
                       if
-                        Random.self_init ();
-                        Random.float 1.0 < r.x
-                      then (
-                        r.x <- r.f r.x;
-                        should_execute := false));
+                        randomly_drop_msgs
+                        &&
+                        (Random.self_init ();
+                         Random.float 1.0 < 0.3)
+                      then should_execute := false;
 
-                  if !should_execute then exec state program r
+                      if
+                        cut_tail_from_mid
+                        && ((src_node = 2 && dest_node = 1)
+                           || (dest_node = 2 && src_node = 1))
+                      then should_execute := false;
+
+                      if sever_all_but_mid then
+                        if dest_node = 2 && not (src_node = 1) then
+                          should_execute := false
+                        else if src_node = 2 && not (dest_node = 1) then
+                          should_execute := false;
+
+                      if
+                        List.mem src_node partition_away_nodes
+                        || List.mem dest_node partition_away_nodes
+                      then should_execute := false;
+
+                      if randomly_delay_msgs then
+                        if
+                          Random.self_init ();
+                          Random.float 1.0 < r.x
+                        then (
+                          r.x <- r.f r.x;
+                          should_execute := false));
+
+                    if !should_execute then exec state program r
               | _ -> exec state program r)
           | _ -> exec state program r)
         else pick (n - 1) (r :: before) rs
@@ -1497,7 +1515,7 @@ let schedule_thread (state : state) (program : program) (func_name : string)
     | [] -> raise Halt
     | c :: cs ->
         if n == 0 then (
-          let op = Env.find program.client_ops func_name in
+          let op = function_info func_name program in
           let env = Env.create 1024 in
           List.iter2
             (fun formal actual -> Env.add env formal actual)

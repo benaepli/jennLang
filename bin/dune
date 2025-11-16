@@ -2,4 +2,4 @@
  (name main)
  (public_name main)
  (libraries yojson mylib)
- (modules main benchmark))
+ (modules main benchmark config))
