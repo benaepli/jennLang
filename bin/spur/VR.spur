@@ -56,9 +56,16 @@ role Node {
     var do_view_change_senders: map<Node, bool> = {};
     var do_view_change_messages: list<DoViewChangeMsg> = [];
     var recovery_response_count: int = 0;
-
     
     func Init(me: int, peers: list<Node>) {
+        self = me;
+        for (var i: int = 0; i < len(peers); i = i + 1) {
+            replicas = append(replicas, peers[i]);
+        }
+    }
+
+    func RecoverInit(me: int, peers: list<Node>) {
+        status = 3;
         self = me;
         for (var i: int = 0; i < len(peers); i = i + 1) {
             replicas = append(replicas, peers[i]);
@@ -411,8 +418,7 @@ ClientInterface {
     var responses: list<(ClientResponse, string)> = [];
 
     // Initializes a replica node.
-    func Init(dest: int, replicas: list<Node>) {
-        @rpc_call(replicas[dest], Init(dest, replicas));
+    func Init() {
     }
 
     // Sends a new write command to a specific replica, retrying on redirect.

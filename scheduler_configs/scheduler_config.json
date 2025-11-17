@@ -6,7 +6,7 @@
     "randomly_delay_msgs": false,
     "crash_config": {
         "enable_random_crashes": true,
-        "crash_probability": 0.000,
+        "crash_probability": 0.001,
         "min_recovery_time": 50,
         "max_recovery_time": 150,
         "crashable_nodes": [],

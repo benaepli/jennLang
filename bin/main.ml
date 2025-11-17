@@ -22,8 +22,6 @@ let create_fresh_global_state () : state =
     waiting_records = [];
     history = DA.create ();
     free_clients = List.init num_clients (fun i -> num_servers + i);
-    free_sys_threads =
-      List.init num_sys_threads (fun i -> num_servers + num_clients + i);
     crash_info =
       {
         currently_crashed = [];
@@ -58,39 +56,69 @@ let print_global_nodes (nodes : value Env.t array) =
       print_endline "")
     nodes
 
-let init_topology (topology : string) (global_state : state) (prog : program)
-    (operation_id_counter : int ref) : unit =
+let init_topology (topology : string) (global_state : state) (prog : program) :
+    unit =
   match topology with
   | "LINEAR" -> raise (Failure "Not implemented LINEAR topology")
   | "STAR" -> raise (Failure "Not implemented STAR topology")
   | "RING" -> raise (Failure "Not implemented RING topology")
   | "FULL" ->
-      let init_fn_name = "ClientInterface.Init" in
+      let init_fn_name = "Node.Init" in
+      let init_fn = Env.find prog.rpc init_fn_name in
       for i = 0 to num_servers - 1 do
-        schedule_client global_state prog init_fn_name
-          [ VInt i; VList (ref (List.init num_servers (fun j -> VNode j))) ]
-          (operation_id_counter := !operation_id_counter + 1;
-           !operation_id_counter);
+        let node_id = i in
+        let env = Env.create 1024 in
+        let peers_list =
+          VList (ref (List.init num_servers (fun j -> VNode j)))
+        in
+        let actuals = [ VInt node_id; peers_list ] in
+        (try
+           List.iter2
+             (fun formal actual -> Env.add env formal actual)
+             init_fn.formals actuals
+         with Invalid_argument _ ->
+           failwith ("Mismatched arguments for " ^ init_fn_name));
+        let temp_record_env =
+          { local_env = env; node_env = global_state.nodes.(node_id) }
+        in
+        List.iter
+          (fun (var_name, default_expr) ->
+            Env.add env var_name (eval temp_record_env default_expr))
+          init_fn.locals;
+        let record =
+          {
+            pc = init_fn.entry;
+            node = node_id;
+            origin_node = node_id;
+            continuation = (fun _ -> ());
+            env;
+            id = -1;
+            x = 0.0;
+            f = (fun x -> x);
+          }
+        in
+        global_state.runnable_records <- record :: global_state.runnable_records;
         sync_exec global_state prog false false false [] false
       done
   | _ -> raise (Failure "Invalid topology")
 
 let recover_node_in_topology (topology : string) (state : state)
     (prog : program) (node_id : int) continuation : unit =
-  let recover_fn_name = "ClientInterface.Recover" in
+  let recover_fn_name = "Node.RecoverInit" in
 
   if Env.mem prog.rpc recover_fn_name then (
-    Printf.printf "  Found recover function: %s\n" recover_fn_name;
+    Printf.printf "Found recover function: %s\n" recover_fn_name;
     let recover_fn = Env.find prog.rpc recover_fn_name in
 
-    (* Prepare actuals based on topology *)
     let actuals =
       match topology with
-      | "FULL" -> [ VList (ref (List.init num_servers (fun j -> VNode j))) ]
+      | "FULL" ->
+          [
+            VInt node_id; VList (ref (List.init num_servers (fun j -> VNode j)));
+          ]
       | _ -> failwith "Recovery not implemented for this topology"
     in
 
-    (* Create activation record to execute recover on the node *)
     let env = Env.create 1024 in
     List.iter2
       (fun formal actual -> Env.add env formal actual)
@@ -108,39 +136,32 @@ let recover_node_in_topology (topology : string) (state : state)
       {
         pc = recover_fn.entry;
         node = node_id;
+        origin_node = node_id;
         continuation = (fun _ -> continuation ());
         env;
         id = -1;
-        (* System recovery *)
         x = 0.0;
         f = (fun x -> x);
       }
     in
-    Printf.printf "here";
-
-    (* Execute recovery directly on the node *)
-    state.runnable_records <- record :: state.runnable_records)
+    exec state prog record)
+  else continuation ()
 
 let reinit_single_node (topology : string) (state : state) (prog : program)
     (node_id : int) continuation : unit =
-  (* Re-run BASE_NODE_INIT *)
-  let init_fn_name = "ClientInterface.BASE_NODE_INIT" in
+  let init_fn_name = "Node.BASE_NODE_INIT" in
   let init_fn = Env.find prog.rpc init_fn_name in
   let env = Env.create 1024 in
-  let record =
-    {
-      pc = init_fn.entry;
-      node = node_id;
-      continuation =
-        (fun _ ->
-          recover_node_in_topology topology state prog node_id continuation);
-      env;
-      id = -1;
-      x = 0.0;
-      f = (fun x -> x);
-    }
-  in
-  state.runnable_records <- record :: state.runnable_records
+
+  let record_env = { local_env = env; node_env = state.nodes.(node_id) } in
+  List.iter
+    (fun (var_name, default_expr) ->
+      Env.add env var_name (eval record_env default_expr))
+    init_fn.locals;
+  Env.add record_env.local_env "self" (VNode node_id);
+
+  let _ = exec_sync prog record_env init_fn.entry in
+  recover_node_in_topology topology state prog node_id continuation
 
 let check_and_apply_crashes (state : state) (prog : program) (topology : string)
     (crash_config : crash_config) (current_step : int) : unit =
@@ -163,23 +184,20 @@ let check_and_apply_crashes (state : state) (prog : program) (topology : string)
         (* Reset node to fresh state *)
         state.nodes.(node_id) <- Env.create 1024;
 
-        let reinstate () =
-          ci.currently_crashed <-
-            List.filter (fun n -> n <> node_id) ci.currently_crashed;
-          let queued_for_node, remaining_queue =
-            List.partition (fun (dest, _) -> dest = node_id) ci.queued_messages
-          in
-          ci.queued_messages <- remaining_queue;
-          Printf.printf "  Delivering %d queued messages to node %d\n"
-            (List.length queued_for_node)
-            node_id;
-          List.iter
-            (fun (_, record) ->
-              state.runnable_records <- record :: state.runnable_records)
-            queued_for_node
+        reinit_single_node topology state prog node_id (fun () -> ());
+        ci.currently_crashed <-
+          List.filter (fun n -> n <> node_id) ci.currently_crashed;
+        let queued_for_node, remaining_queue =
+          List.partition (fun (dest, _) -> dest = node_id) ci.queued_messages
         in
-        (* Re-run BASE_NODE_INIT *)
-        reinit_single_node topology state prog node_id reinstate)
+        ci.queued_messages <- remaining_queue;
+        Printf.printf "Delivering %d queued messages to node %d\n"
+          (List.length queued_for_node)
+          node_id;
+        List.iter
+          (fun (_, record) ->
+            state.runnable_records <- record :: state.runnable_records)
+          queued_for_node)
       to_recover;
 
     (* Randomly crash nodes *)
@@ -208,11 +226,46 @@ let check_and_apply_crashes (state : state) (prog : program) (topology : string)
           ci.currently_crashed <- node_id :: ci.currently_crashed;
           ci.recovery_schedule <- (node_id, recover_at) :: ci.recovery_schedule;
 
-          (* Drop all pending work for this crashed node *)
-          state.runnable_records <-
-            List.filter (fun r -> r.node <> node_id) state.runnable_records;
-          state.waiting_records <-
-            List.filter (fun r -> r.node <> node_id) state.waiting_records))
+          let all_tasks_on_crashed_node, remaining_runnable =
+            List.partition (fun r -> r.node = node_id) state.runnable_records
+          in
+          let waiting_tasks_on_crashed_node, remaining_waiting =
+            List.partition (fun r -> r.node = node_id) state.waiting_records
+          in
+
+          state.runnable_records <- remaining_runnable;
+          state.waiting_records <- remaining_waiting;
+
+          let all_pending_tasks =
+            all_tasks_on_crashed_node @ waiting_tasks_on_crashed_node
+          in
+
+          (* Partition tasks: queue external RPCs, drop local tasks *)
+          let tasks_to_queue, tasks_to_drop =
+            List.partition
+              (fun r ->
+                let is_external = r.origin_node <> r.node in
+                let origin_is_alive =
+                  not (List.mem r.origin_node ci.currently_crashed)
+                in
+                (* We queue it iff it's an external task and its origin is alive *)
+                is_external && origin_is_alive)
+              all_pending_tasks
+          in
+
+          (* Queue the external tasks for redelivery upon recovery *)
+          let messages_to_queue =
+            List.map (fun r -> (node_id, r)) tasks_to_queue
+          in
+
+          Printf.printf
+            "Dropping %d local tasks and queuing %d external tasks from \
+             crashed node %d\n"
+            (List.length tasks_to_drop)
+            (List.length messages_to_queue)
+            node_id;
+
+          ci.queued_messages <- messages_to_queue @ ci.queued_messages))
       eligible
 
 let rec schedule_random_op (global_state : state) (prog : program)
@@ -303,6 +356,7 @@ let rec schedule_random_op (global_state : state) (prog : program)
     {
       pc = op.entry;
       node = client_id;
+      origin_node = client_id;
       continuation = new_continuation;
       env;
       id = new_op_id;
@@ -332,19 +386,18 @@ let init_clients (global_state : state) (prog : program) : unit =
     let client_id = num_servers + i in
     let init_fn = function_info "ClientInterface.BASE_NODE_INIT" prog in
     let env = Env.create 1024 in
-    let record =
-      {
-        pc = init_fn.entry;
-        node = client_id;
-        continuation = (fun _ -> ());
-        env;
-        id = -1;
-        x = 0.0;
-        f = (fun x -> x);
-      }
+
+    let record_env =
+      { local_env = env; node_env = global_state.nodes.(client_id) }
     in
-    global_state.runnable_records <- [ record ];
-    sync_exec global_state prog false false false [] false
+    List.iter
+      (fun (var_name, default_expr) ->
+        Env.add env var_name (eval record_env default_expr))
+      init_fn.locals;
+    Env.add record_env.local_env "self" (VNode client_id);
+
+    let _ = exec_sync prog record_env init_fn.entry in
+    ()
   done
 
 let init_nodes (global_state : state) (prog : program) : unit =
@@ -354,36 +407,32 @@ let init_nodes (global_state : state) (prog : program) : unit =
   for i = 0 to num_servers - 1 do
     let node_id = i in
     let env = Env.create 1024 in
-    let record =
-      {
-        pc = init_fn.entry;
-        node = node_id;
-        continuation = (fun _ -> ());
-        (* Fire and forget *)
-        env;
-        id = -1;
-        (* System init *)
-        x = 0.0;
-        f = (fun x -> x);
-      }
+
+    let record_env =
+      { local_env = env; node_env = global_state.nodes.(node_id) }
     in
-    (* Add the record and run it to initialize the node's state *)
-    global_state.runnable_records <- record :: global_state.runnable_records;
-    sync_exec global_state prog false false false [] false
+    List.iter
+      (fun (var_name, default_expr) ->
+        Env.add env var_name (eval record_env default_expr))
+      init_fn.locals;
+    Env.add record_env.local_env "self" (VNode node_id);
+
+    let _ = exec_sync prog record_env init_fn.entry in
+    ()
   done
 
-let bootlegged_sync_exec (global_state : state) (prog : program)
+let limited_exec (global_state : state) (prog : program)
     (randomly_drop_msgs : bool) (cut_tail_from_mid : bool)
     (sever_all_to_tail_but_mid : bool) (partition_away_nodes : int list)
     (randomly_delay_msgs : bool) (max_iterations : int)
     (crash_conf : crash_config) : unit =
   let count = ref 0 in
   for _ = 0 to max_iterations do
-    if not (List.length global_state.runnable_records = 0) then (
-      count := !count + 1;
-      check_and_apply_crashes global_state prog topology crash_conf !count;
+    count := !count + 1;
+    check_and_apply_crashes global_state prog topology crash_conf !count;
+    if not (List.length global_state.runnable_records = 0) then
       schedule_record global_state prog randomly_drop_msgs cut_tail_from_mid
-        sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs)
+        sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs
   done;
   Printf.printf "Executed %d record scheduling iterations\n" !count;
   Printf.printf "Remaining runnable records: %d\n"
@@ -409,11 +458,11 @@ let interp (compiled_json : string) (intermediate_output : string)
   let operation_id_counter = ref 0 in
   init_clients fresh_state prog;
   init_nodes fresh_state prog;
-  init_topology topology fresh_state prog operation_id_counter;
+  init_topology topology fresh_state prog;
   (* schedule_vr_executions fresh_state prog operation_id_counter; *)
   start_random_client_loops fresh_state prog operation_id_counter;
 
-  bootlegged_sync_exec fresh_state prog randomly_drop_msgs cut_tail_from_mid
+  limited_exec fresh_state prog randomly_drop_msgs cut_tail_from_mid
     sever_all_to_tail_but_mid partition_away_nodes randomly_delay_msgs
     max_iterations config.crash_config;
   save_history_to_csv fresh_state.history intermediate_output;

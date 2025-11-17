@@ -1,29 +1,4 @@
 module DA = BatDynArray
-(* A couple of features of the language in ast.ml make it difficult to
-   implement directly:
-   - RPCs and function calls in RHSs are complicated (e.g., consider an RPC as
-     an argument of an RPC).  If there's a need for such constructs, the usual
-     solution is to translate them away -- e.g.,
-       y = f(g(x))
-     gets translated to the IR
-       tmp = g(x)
-      
- y = f(tmp)
-   - An RPC to a func that nominally returns (say) a string cannot evaluate to
-     an string -- otherwise, the only way to execute the program is to preempt
-     the current activation record and wait until the RPC returns to resume.  In
-     particular, this makes it very difficult to implement fault-tolerant
-     protocols -- if node A calls an RPC on node B and node B fails, then node
-     A's activation record is blocked 
-forever.  The proposed alternative is that
-     an RPC that nomially returns a string evaluates to Future<string>.  We can
-     manipulate a valute of type Future<string> by
-   - checking whether its value is available (e.g.
-fut.isAvailable() -> bool)
-       (nonpreemptible)
-   - retrieving its value (e.g. fut.isValue() -> string) (preemptible)
-   - In general, I do not understand how "Roles" should be implemented
-*)
 
 type expr =
   | EVar of string
@@ -488,6 +463,7 @@ end
 type record = {
   mutable pc : CFG.vertex;
   node : int;
+  origin_node : int;
   continuation : value -> unit;
       (* Called when activation record returns
                                 For RPCs, this writes to the associate future;
@@ -525,7 +501,6 @@ type state = {
   history : operation DA.t;
   mutable free_clients :
     int list (* client ids should be valid indexes into nodes *);
-  mutable free_sys_threads : int list (* internal systems threads *);
   crash_info : crash_info;
 }
 
@@ -926,35 +901,6 @@ let function_info name program =
     Printf.printf "function %s is not defined in program.functions\n" name;
     failwith "Function not found"
 
-let create_rpc_record node_id func actuals env program record =
-  let { entry; formals; locals; _ } = function_info func program in
-  let new_env = Env.create 1024 in
-  (try
-     List.iter2
-       (fun formal actual -> Env.add new_env formal (eval env actual))
-       formals actuals
-   with Invalid_argument _ ->
-     Printf.printf
-       "Func %s mismatches def and caller args\n\
-       \                    formals: %s\n\n\
-       \                               actuals: %s\n"
-       func
-       (String.concat ", " formals)
-       (String.concat ", \n" (List.map to_string_expr actuals));
-     failwith "Mismatched arguments in function call");
-  List.iter
-    (fun (var_name, expr) -> Env.add new_env var_name (eval env expr))
-    locals;
-  {
-    node = node_id;
-    pc = entry;
-    continuation = (fun value -> ref None := Some value);
-    env = new_env;
-    id = record.id;
-    x = record.x;
-    f = record.f;
-  }
-
 let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
     : value =
   let current_pc = ref start_pc in
@@ -1113,8 +1059,7 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
     VUnit
   with SyncReturn v -> v
 
-(* Execute record until pause/return.  Invariant: record does *not* belong to
-   state.records *)
+(* Execute record until pause/return.*)
 let exec (state : state) (program : program) (record : record) =
   let env = { local_env = record.env; node_env = state.nodes.(record.node) } in
   Env.add env.local_env "self" (VNode record.node);
@@ -1152,6 +1097,7 @@ let exec (state : state) (program : program) (record : record) =
                 let new_record =
                   {
                     node = node_id;
+                    origin_node = record.node;
                     pc = entry;
                     continuation =
                       (fun value ->
@@ -1164,39 +1110,16 @@ let exec (state : state) (program : program) (record : record) =
                   }
                 in
                 store lhs (VFuture new_future) env;
-                state.runnable_records <- new_record :: state.runnable_records
-            | VString role -> (
-                match load role env with
-                | VNode node_id ->
-                    let new_future = { value = None; waiters = [] } in
-                    let { entry; formals; _ } = function_info func program in
-                    let new_env = Env.create 1024 in
-                    List.iter2
-                      (fun formal actual ->
-                        Env.add new_env formal (eval env actual))
-                      formals actuals;
-                    let new_record =
-                      {
-                        node = node_id;
-                        pc = entry;
-                        continuation =
-                          (fun value ->
-                            new_future.value <- Some value;
-                            wake_waiters new_future);
-                        env = new_env;
-                        id = record.id;
-                        x = record.x;
-                        f = record.f;
-                      }
-                    in
-                    store lhs (VFuture new_future) env;
-                    state.runnable_records <-
-                      new_record :: state.runnable_records
-                | other ->
-                    failwith
-                      (Printf.sprintf
-                         "Type error: role string resolved to %s, expected node"
-                         (type_name other)))
+                if List.mem node_id state.crash_info.currently_crashed then (
+                  Printf.printf
+                    "Queueing new message from %d to crashed node %d (from exec)\n"
+                    record.node node_id;
+                  state.crash_info.queued_messages <-
+                    (node_id, new_record) :: state.crash_info.queued_messages)
+                else (
+                  Printf.printf "Adding record from %d to %d \n"
+                    new_record.origin_node new_record.node;
+                  state.runnable_records <- new_record :: state.runnable_records)
             | other ->
                 failwith
                   (Printf.sprintf "Type error: expected node for RPC, got %s"
@@ -1291,7 +1214,20 @@ let exec (state : state) (program : program) (record : record) =
                 let resume_callback value =
                   record.pc <- next;
                   store lhs value env;
-                  state.runnable_records <- record :: state.runnable_records
+
+                  if List.mem record.node state.crash_info.currently_crashed
+                  then (
+                    (* Node is crashed: Queue for recovery *)
+                    Printf.printf
+                      "Queueing (from waiter) task from %d for crashed node %d\n"
+                      record.origin_node record.node;
+                    state.crash_info.queued_messages <-
+                      (record.node, record) :: state.crash_info.queued_messages)
+                  else (
+                    (* Node is alive: Add back to runnable records *)
+                    state.runnable_records <- record :: state.runnable_records;
+                    Printf.printf "Waiter adding record from %d to %d \n"
+                      record.origin_node record.node)
                 in
                 fut.waiters <- resume_callback :: fut.waiters;
                 state.waiting_records <- record :: state.waiting_records)
@@ -1434,9 +1370,12 @@ let schedule_record (state : state) (program : program)
     match after with
     | [] -> raise Halt
     | r :: rs ->
-        (* Skip if sender node is crashed *)
         if List.mem r.node state.crash_info.currently_crashed then
-          (* Don't execute - node is crashed, just remove from queue *)
+          (* This should never happen *)
+          let _ =
+            Printf.printf "Failure: source %d for dst %d \n" r.origin_node
+              r.node
+          in
           state.runnable_records <- List.rev_append before rs
         else if n == 0 then (
           let env = { local_env = r.env; node_env = state.nodes.(r.node) } in
@@ -1507,7 +1446,7 @@ let schedule_record (state : state) (program : program)
 
 (* Helper function to schedule a thread *)
 let schedule_thread (state : state) (program : program) (func_name : string)
-    (actuals : value list) (unique_id : int)
+    (actuals : value list) (unique_id : int) (origin : int)
     (get_free_threads : unit -> int list)
     (update_free_threads : int list -> unit) : unit =
   let rec pick n before after =
@@ -1557,6 +1496,7 @@ let schedule_thread (state : state) (program : program) (func_name : string)
             {
               pc = op.entry;
               node = c;
+              origin_node = origin;
               continuation;
               env;
               id = unique_id;
@@ -1577,13 +1517,7 @@ let schedule_thread (state : state) (program : program) (func_name : string)
 (* Choose a client without a pending operation, create a new activation record
    to execute it, and append the invocation to the history *)
 let schedule_client (state : state) (program : program) (func_name : string)
-    (actuals : value list) (unique_id : int) : unit =
-  schedule_thread state program func_name actuals unique_id
+    (actuals : value list) (unique_id : int) (origin : int) : unit =
+  schedule_thread state program func_name actuals unique_id origin
     (fun () -> state.free_clients)
     (fun threads -> state.free_clients <- threads)
-
-let schedule_sys_thread (state : state) (program : program) (func_name : string)
-    (actuals : value list) (unique_id : int) : unit =
-  schedule_thread state program func_name actuals unique_id
-    (fun () -> state.free_sys_threads)
-    (fun threads -> state.free_sys_threads <- threads)
