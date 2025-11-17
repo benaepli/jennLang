@@ -1116,10 +1116,8 @@ let exec (state : state) (program : program) (record : record) =
                     record.node node_id;
                   state.crash_info.queued_messages <-
                     (node_id, new_record) :: state.crash_info.queued_messages)
-                else (
-                  Printf.printf "Adding record from %d to %d \n"
-                    new_record.origin_node new_record.node;
-                  state.runnable_records <- new_record :: state.runnable_records)
+                else
+                  state.runnable_records <- new_record :: state.runnable_records
             | other ->
                 failwith
                   (Printf.sprintf "Type error: expected node for RPC, got %s"
@@ -1223,11 +1221,9 @@ let exec (state : state) (program : program) (record : record) =
                       record.origin_node record.node;
                     state.crash_info.queued_messages <-
                       (record.node, record) :: state.crash_info.queued_messages)
-                  else (
+                  else
                     (* Node is alive: Add back to runnable records *)
-                    state.runnable_records <- record :: state.runnable_records;
-                    Printf.printf "Waiter adding record from %d to %d \n"
-                      record.origin_node record.node)
+                    state.runnable_records <- record :: state.runnable_records
                 in
                 fut.waiters <- resume_callback :: fut.waiters;
                 state.waiting_records <- record :: state.waiting_records)

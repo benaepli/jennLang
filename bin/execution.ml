@@ -1,0 +1,340 @@
+open Plan
+open Mylib.Simulator
+
+type topology_info = { topology : string; num_servers : int }
+
+let recover_node_in_topology (topology : topology_info) (state : state)
+    (prog : program) (node_id : int) continuation : unit =
+  let recover_fn_name = "Node.RecoverInit" in
+
+  if Env.mem prog.rpc recover_fn_name then (
+    Printf.printf "Found recover function: %s\n" recover_fn_name;
+    let recover_fn = Env.find prog.rpc recover_fn_name in
+
+    let actuals =
+      match topology.topology with
+      | "FULL" ->
+          [
+            VInt node_id;
+            VList (ref (List.init topology.num_servers (fun j -> VNode j)));
+          ]
+      | _ -> failwith "Recovery not implemented for this topology"
+    in
+
+    let env = Env.create 1024 in
+    List.iter2
+      (fun formal actual -> Env.add env formal actual)
+      recover_fn.formals actuals;
+
+    let temp_record_env =
+      { local_env = env; node_env = state.nodes.(node_id) }
+    in
+    List.iter
+      (fun (var_name, default_expr) ->
+        Env.add env var_name (eval temp_record_env default_expr))
+      recover_fn.locals;
+
+    let record =
+      {
+        pc = recover_fn.entry;
+        node = node_id;
+        origin_node = node_id;
+        continuation = (fun _ -> continuation ());
+        env;
+        id = -1;
+        x = 0.0;
+        f = (fun x -> x);
+      }
+    in
+    exec state prog record)
+  else continuation ()
+
+let reinit_single_node (topology : topology_info) (state : state)
+    (prog : program) (node_id : int) continuation : unit =
+  let init_fn_name = "Node.BASE_NODE_INIT" in
+  let init_fn = Env.find prog.rpc init_fn_name in
+  let env = Env.create 1024 in
+
+  let record_env = { local_env = env; node_env = state.nodes.(node_id) } in
+  List.iter
+    (fun (var_name, default_expr) ->
+      Env.add env var_name (eval record_env default_expr))
+    init_fn.locals;
+  Env.add record_env.local_env "self" (VNode node_id);
+
+  let _ = exec_sync prog record_env init_fn.entry in
+  recover_node_in_topology topology state prog node_id continuation
+
+let in_progress_client_ops : (int, event_id) Hashtbl.t = Hashtbl.create 10
+
+let force_crash_node (state : state) (node_id : int) : unit =
+  let ci = state.crash_info in
+
+  (* Don't crash a node that is already crashed *)
+  if List.mem node_id ci.currently_crashed then (
+    Printf.printf "WARN: Request to crash node %d, which is already crashed.\n"
+      node_id;
+    ())
+  else (
+    Printf.printf "CRASH: Forcing crash of node %d at step %d\n" node_id
+      ci.current_step;
+
+    ci.currently_crashed <- node_id :: ci.currently_crashed;
+
+    (* Partition runnable and waiting records for the crashed node *)
+    let all_tasks_on_crashed_node, remaining_runnable =
+      List.partition (fun r -> r.node = node_id) state.runnable_records
+    in
+    let waiting_tasks_on_crashed_node, remaining_waiting =
+      List.partition (fun r -> r.node = node_id) state.waiting_records
+    in
+
+    state.runnable_records <- remaining_runnable;
+    state.waiting_records <- remaining_waiting;
+
+    let all_pending_tasks =
+      all_tasks_on_crashed_node @ waiting_tasks_on_crashed_node
+    in
+
+    (* Partition tasks: queue external RPCs, drop local tasks *)
+    let tasks_to_queue, tasks_to_drop =
+      List.partition
+        (fun r ->
+          let is_external = r.origin_node <> r.node in
+          let origin_is_alive =
+            not (List.mem r.origin_node ci.currently_crashed)
+          in
+          is_external && origin_is_alive)
+        all_pending_tasks
+    in
+
+    (* Queue the external tasks for redelivery upon recovery *)
+    let messages_to_queue = List.map (fun r -> (node_id, r)) tasks_to_queue in
+
+    Printf.printf
+      "Dropping %d local tasks and queuing %d external tasks from crashed node \
+       %d\n"
+      (List.length tasks_to_drop)
+      (List.length messages_to_queue)
+      node_id;
+
+    ci.queued_messages <- messages_to_queue @ ci.queued_messages)
+
+let force_recover_node (state : state) (prog : program)
+    (topology : topology_info) (node_id : int) : unit =
+  let ci = state.crash_info in
+
+  (* Only recover nodes that are actually crashed *)
+  if not (List.mem node_id ci.currently_crashed) then (
+    Printf.printf "WARN: Request to recover node %d, which is not crashed.\n"
+      node_id;
+    () (* Do nothing *))
+  else (
+    Printf.printf "RECOVER: Forcing recovery of node %d at step %d\n" node_id
+      ci.current_step;
+
+    (* Reset node to fresh state *)
+    state.nodes.(node_id) <- Env.create 1024;
+
+    (* Call the re-initialization logic *)
+    reinit_single_node topology state prog node_id (fun () -> ());
+
+    (* Remove from crashed list *)
+    ci.currently_crashed <-
+      List.filter (fun n -> n <> node_id) ci.currently_crashed;
+
+    (* Find all queued messages for this node *)
+    let queued_for_node, remaining_queue =
+      List.partition (fun (dest, _) -> dest = node_id) ci.queued_messages
+    in
+    ci.queued_messages <- remaining_queue;
+
+    Printf.printf "Delivering %d queued messages to recovered node %d\n"
+      (List.length queued_for_node)
+      node_id;
+
+    (* Add all queued messages back to the runnable list *)
+    List.iter
+      (fun (_, record) ->
+        state.runnable_records <- record :: state.runnable_records)
+      queued_for_node)
+
+(**
+* Schedules a pre-planned client operation.
+*
+* @param operation_id_counter A ref to the global counter for unique IDs.
+* @param event_id The string ID from the execution_plan.
+* @param op_spec The (Write/Read/Timeout) action to perform.
+* @param op_map A hashtable mapping internal int IDs back to event_ids.
+* @param plan_engine A ref to the main plan engine.
+*)
+let schedule_planned_op (state : state) (program : program)
+    (operation_id_counter : int ref) (* Must be passed from interp/exec_plan *)
+    (event_id : event_id) (op_spec : client_op_spec)
+    (op_map : (int, event_id) Hashtbl.t) (plan_engine : PlanEngine.t ref) : unit
+    =
+  (* Get a free client *)
+  let client_id =
+    match state.free_clients with
+    | [] ->
+        failwith
+          ("Failed to dispatch event " ^ event_id
+         ^ ": No free clients available.")
+    | hd :: tl ->
+        state.free_clients <- tl;
+        (* *)
+        hd
+  in
+
+  (* Generate a new internal operation ID *)
+  let new_op_id =
+    operation_id_counter := !operation_id_counter + 1;
+    !operation_id_counter
+  in
+
+  (* Link internal ID to plan event ID *)
+  Hashtbl.add op_map new_op_id event_id;
+
+  let op_name, actuals =
+    match op_spec with
+    | Write (target_node, key, value) ->
+        ( "ClientInterface.Write",
+          [ VNode target_node; VString key; VString value ] )
+    | Read (target_node, key) ->
+        ("ClientInterface.Read", [ VNode target_node; VString key ])
+    | SimulateTimeout target_node ->
+        ("ClientInterface.SimulateTimeout", [ VNode target_node ])
+  in
+
+  let op = function_info op_name program in
+  let env = Env.create 1024 in
+  (try
+     List.iter2
+       (fun formal actual -> Env.add env formal actual)
+       op.formals actuals
+   with Invalid_argument _ ->
+     failwith ("Mismatched arguments for planned op: " ^ op_name));
+
+  let temp_record_env =
+    { local_env = env; node_env = state.nodes.(client_id) }
+  in
+  List.iter
+    (fun (var_name, default_expr) ->
+      Env.add env var_name (eval temp_record_env default_expr))
+    op.locals;
+
+  (* Log the invocation to history *)
+  let invocation =
+    {
+      client_id;
+      op_action = op.name;
+      kind = Invocation;
+      payload = actuals;
+      unique_id = new_op_id;
+    }
+  in
+  DA.add state.history invocation;
+
+  (* Important: create the new continuation *)
+  let new_continuation value =
+    let response =
+      {
+        client_id;
+        op_action = op.name;
+        kind = Response;
+        payload = [ value ];
+        unique_id = new_op_id;
+      }
+    in
+    DA.add state.history response;
+
+    (* Hook to plan engine *)
+    (* Find the event_id (string) from the internal unique_id (int) *)
+    let completed_event_id =
+      try Hashtbl.find op_map new_op_id
+      with Not_found ->
+        failwith
+          ("schedule_planned_op: Could not find event_id for op_id "
+         ^ string_of_int new_op_id)
+    in
+
+    (* Mark the event as complete in the engine *)
+    plan_engine :=
+      PlanEngine.mark_event_completed !plan_engine completed_event_id;
+    Printf.printf " Completed client op %s (ID: %d)\n" completed_event_id
+      new_op_id;
+
+    (* Return the client to the free pool *)
+    state.free_clients <- client_id :: state.free_clients;
+
+    (* Remove from in-progress map *)
+    Hashtbl.remove op_map new_op_id;
+    ()
+  in
+
+  (* Create and schedule the new record *)
+  let record =
+    {
+      pc = op.entry;
+      node = client_id;
+      origin_node = client_id;
+      continuation = new_continuation;
+      env;
+      id = new_op_id;
+      x = 0.4;
+      f = (fun x -> x);
+    }
+  in
+  state.runnable_records <- record :: state.runnable_records;
+  Printf.printf " Dispatched client op %s (ID: %d) on client %d\n" event_id
+    new_op_id client_id
+
+let exec_plan (state : state) (program : program) (plan : execution_plan)
+    (max_iterations : int) (topology : topology_info)
+    (operation_id_counter : int ref) : unit =
+  let plan_engine = ref (PlanEngine.create plan) in
+  let current_step = ref 0 in
+
+  (* This is the main loop. It runs as long as the plan isn't
+     complete, or until we hit the safety timeout. *)
+  while
+    (not (PlanEngine.is_complete !plan_engine))
+    && !current_step < max_iterations
+  do
+    (* Dispatch all ready events from the plan *)
+    let ready_events, new_engine = PlanEngine.get_ready_events !plan_engine in
+    plan_engine := new_engine;
+
+    List.iter
+      (fun (event : planned_event) ->
+        Printf.printf "STEP %d: Dispatching event %s\n" !current_step event.id;
+
+        match event.action with
+        | ClientRequest op_spec ->
+            schedule_planned_op state program operation_id_counter event.id
+              op_spec in_progress_client_ops plan_engine
+        | CrashNode node_id ->
+            force_crash_node state node_id;
+            (* This is an instantaneous event, so mark it complete immediately *)
+            plan_engine := PlanEngine.mark_event_completed !plan_engine event.id
+        | RecoverNode node_id ->
+            force_recover_node state program topology node_id;
+            plan_engine := PlanEngine.mark_event_completed !plan_engine event.id)
+      ready_events;
+
+    (* Run the Simulator's async "network" for one step *)
+    if List.length state.runnable_records > 0 then
+      schedule_record state program false false false []
+        false (* Disable all random fault injection *)
+    else
+      (* If nothing is runnable, we just advance the plan.
+         This can happen if we are waiting for a client op to be dispatched. *)
+      ();
+
+    current_step := !current_step + 1
+  done;
+
+  Printf.printf "Execution plan completed in %d steps.\n" !current_step;
+  if !current_step >= max_iterations then
+    Printf.printf "WARNING: Hit max iterations (%d) before plan completion.\n"
+      max_iterations
