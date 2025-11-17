@@ -29,6 +29,16 @@ type PrepareMsg {
     commit_number: int;
 };
 
+// Represents the state information sent during recovery.
+type RecoveryResponseMsg {
+    view: int;
+    nonce: int;
+    log: list<LogEntry>?;
+    op_number: int?;
+    commit_number: int?;
+    sender: Node;
+};
+
 role Node {
     // Persistent state
     var self: int = 0;
@@ -55,7 +65,10 @@ role Node {
     var start_view_change_senders: map<Node, bool> = {};
     var do_view_change_senders: map<Node, bool> = {};
     var do_view_change_messages: list<DoViewChangeMsg> = [];
-    var recovery_response_count: int = 0;
+    
+    var recovery_nonce: int = 0;
+    var recovery_responses: list<RecoveryResponseMsg> = [];
+    var recovery_response_senders: map<Node, bool> = {};
     
     func Init(me: int, peers: list<Node>) {
         self = me;
@@ -65,10 +78,24 @@ role Node {
     }
 
     func RecoverInit(me: int, peers: list<Node>) {
-        status = 3;
+        status = 2;
         self = me;
         for (var i: int = 0; i < len(peers); i = i + 1) {
-            replicas = append(replicas, peers[i]);
+          replicas = append(replicas, peers[i]);
+        }
+
+        recovery_nonce = recovery_nonce + 1;
+
+        // Clear state from any previous recovery attempts
+        recovery_responses = [];
+        recovery_response_senders = {};
+
+        var checkpoint_op: int = applied_op_count;
+
+        for (var i: int = 0; i < len(replicas); i = i + 1) {
+            if (i != self) {
+                rpc_call(replicas[i], Recovery(replicas[self], recovery_nonce, checkpoint_op));
+            }
         }
     }
 
@@ -317,9 +344,129 @@ role Node {
         }
     }
 
-    // Empty stubs
-    func Recovery(replica_id: Node, nonce: int) {}
-    func RecoveryResponse(nonce: int, view: int, log: list<LogEntry>, op_number: int, commit_number: int) {}
+    func Recovery(replica_id: Node, nonce: int, checkpoint_op: int) {
+        // Only respond if status is normal
+        if (status != 0) {
+            return ();
+        }
+
+        var current_primary: Node = primary_of(view_number);
+
+        if (replicas[self] == current_primary) {
+            // This node is the primary. Send the full state.
+
+            // Find the log suffix after the recovering node's last checkpoint
+            var log_suffix: list<LogEntry> = [];
+            for (var i: int = checkpoint_op; i < len(log); i = i + 1) {
+                log_suffix = append(log_suffix, log[i]);
+            }
+
+            // Send the response with the log and current numbers
+            rpc_call(replica_id, RecoveryResponse(view_number, nonce, log_suffix, op_number, commit_number, replicas[self]));
+
+        } else {
+            // This node is a backup. Send a response with nil state.
+            rpc_call(replica_id, RecoveryResponse(view_number, nonce, nil, nil, nil, replicas[self]));
+        }
+    }
+
+    func RecoveryResponse(other_view: int, other_nonce: int, other_log: list<LogEntry>?, other_op_number: int?, other_commit_number: int?, sender_id: Node) {
+        if (status != 2) {
+            return ();
+        }
+        if (other_nonce != recovery_nonce) {
+            return ();
+        }
+
+        // Ignore duplicate responses from the same sender
+        if (exists(recovery_response_senders, sender_id)) {
+            return ();
+        }
+
+        // Store the response
+        recovery_response_senders[sender_id] = true;
+        recovery_responses = append(recovery_responses, RecoveryResponseMsg {
+            view: other_view,
+            nonce: other_nonce,
+            log: other_log,
+            op_number: other_op_number,
+            commit_number: other_commit_number,
+            sender: sender_id
+        });
+
+        // Check if we have a quorum of f+1 responses
+        var quorum: int = f() + 1;
+        if (len(recovery_response_senders) < quorum) {
+            return (); // Not enough responses yet
+        }
+
+
+        // 1. Find the latest view number seen in the responses
+        var latest_view: int = -1;
+        for (var i: int = 0; i < len(recovery_responses); i = i + 1) {
+            if (recovery_responses[i].view > latest_view) {
+                latest_view = recovery_responses[i].view;
+            }
+        }
+
+        if (latest_view == -1) {
+            return (); // Should not happen
+        }
+
+        var latest_view_primary: Node = primary_of(latest_view);
+
+        var primary_resp: RecoveryResponseMsg? = nil;
+        for (var i: int = 0; i < len(recovery_responses); i = i + 1) {
+            var resp: RecoveryResponseMsg = recovery_responses[i];
+            if (resp.view == latest_view and resp.sender == latest_view_primary) {
+                primary_resp = resp;
+                break;
+            }
+        }
+
+        if (primary_resp == nil) {
+            return ();
+        }
+
+        var p_resp: RecoveryResponseMsg = primary_resp!;
+
+        if (p_resp.log == nil or p_resp.op_number == nil or p_resp.commit_number == nil) {
+            println("Recovery failed: Primary sent nil state.");
+            return ();
+        }
+
+        // Update our state using the primary's information
+        view_number = p_resp.view;
+        commit_number = p_resp.commit_number!;
+        op_number = p_resp.op_number!;
+
+        // Reconstruct the log: our local prefix + primary's suffix
+        var new_log: list<LogEntry> = [];
+        for (var i: int = 0; i < applied_op_count; i = i + 1) {
+            new_log = append(new_log, log[i]);
+        }
+        // Append the suffix from the primary
+        var log_suffix: list<LogEntry> = p_resp.log!;
+        for (var i: int = 0; i < len(log_suffix); i = i + 1) {
+            new_log = append(new_log, log_suffix[i]);
+        }
+        log = new_log;
+
+        status = 0;
+
+        recovery_responses = [];
+        recovery_response_senders = {};
+
+        apply_committed_entries();
+
+        // Send PrepareOK for non-committed ops to new primary
+        var new_primary: Node = primary_of(view_number);
+        if (replicas[self] != new_primary) {
+            for (var i: int = commit_number + 1; i <= op_number; i = i + 1) {
+                rpc_call(new_primary, PrepareOK(view_number, i, replicas[self]));
+            }
+        }
+    }
 
     // Accepts a new command, logs it, and starts the replication process.
     func NewEntry(cmd: Command) -> future<ClientResponse> {
