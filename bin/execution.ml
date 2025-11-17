@@ -295,7 +295,7 @@ let schedule_planned_op (state : state) (program : program)
 
 let exec_plan (state : state) (program : program) (plan : execution_plan)
     (max_iterations : int) (topology : topology_info)
-    (operation_id_counter : int ref) : unit =
+    (operation_id_counter : int ref) (randomly_delay_msgs : bool) : unit =
   let plan_engine = ref (PlanEngine.create plan) in
   let current_step = ref 0 in
   let deferred_ops = ref [] in
@@ -346,7 +346,7 @@ let exec_plan (state : state) (program : program) (plan : execution_plan)
     (* Run the Simulator's async "network" for one step *)
     if List.length state.runnable_records > 0 then
       schedule_record state program false false false []
-        false (* Disable all random fault injection *)
+        randomly_delay_msgs (* Disable all random fault injection *)
     else
       (* If nothing is runnable, we just advance the plan.
          This can happen if we are waiting for a client op to be dispatched. *)
