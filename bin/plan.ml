@@ -159,6 +159,21 @@ module PlanEngine = struct
       unmet_dependencies = new_deps;
     }
 
+  let mark_as_ready (engine : t) (id : event_id) : t =
+    match EventMap.find_opt id engine.event_statuses with
+    | Some InProgress ->
+        {
+          engine with
+          event_statuses = EventMap.add id Ready engine.event_statuses;
+        }
+    | Some _ ->
+        failwith
+          ("PlanEngine: Tried to mark event " ^ id
+         ^ " back to Ready, but it was not InProgress.")
+    | None ->
+        failwith
+          ("PlanEngine: Tried to mark unknown event " ^ id ^ " back to Ready.")
+
   let is_complete (engine : t) : bool =
     EventMap.for_all (fun _ status -> status = Completed) engine.event_statuses
 end

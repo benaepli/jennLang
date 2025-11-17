@@ -1,7 +1,43 @@
 open Plan
 open Mylib.Simulator
 
+let default_env_size = 1024
+
 type topology_info = { topology : string; num_servers : int }
+
+(**
+ * Creates and initializes an environment with formals, actuals, and locals.
+ * 
+ * @param env_size The size of the environment to create
+ * @param node_env The node's environment (from state.nodes)
+ * @param formals List of formal parameter names
+ * @param actuals List of actual parameter values
+ * @param locals List of (name, default_expr) pairs for local variables
+ * @param context_name Optional context for error messages
+ * @return The initialized environment
+ *)
+let create_initialized_env (env_size : int) (node_env : 'a Env.t)
+    (formals : string list) (actuals : value list)
+    (locals : (string * expr) list) ?(context_name : string = "function") () :
+    'a Env.t =
+  let env = Env.create env_size in
+
+  (* Add formal parameters *)
+  (try
+     List.iter2 (fun formal actual -> Env.add env formal actual) formals actuals
+   with Invalid_argument _ ->
+     failwith
+       (Printf.sprintf "Mismatched arguments for %s: expected %d, got %d"
+          context_name (List.length formals) (List.length actuals)));
+
+  (* Evaluate and add local variables *)
+  let record_env = { local_env = env; node_env } in
+  List.iter
+    (fun (var_name, default_expr) ->
+      Env.add env var_name (eval record_env default_expr))
+    locals;
+
+  env
 
 let recover_node_in_topology (topology : topology_info) (state : state)
     (prog : program) (node_id : int) continuation : unit =
@@ -21,18 +57,11 @@ let recover_node_in_topology (topology : topology_info) (state : state)
       | _ -> failwith "Recovery not implemented for this topology"
     in
 
-    let env = Env.create 1024 in
-    List.iter2
-      (fun formal actual -> Env.add env formal actual)
-      recover_fn.formals actuals;
-
-    let temp_record_env =
-      { local_env = env; node_env = state.nodes.(node_id) }
+    let env =
+      create_initialized_env default_env_size state.nodes.(node_id)
+        recover_fn.formals actuals recover_fn.locals
+        ~context_name:"Node.RecoverInit" ()
     in
-    List.iter
-      (fun (var_name, default_expr) ->
-        Env.add env var_name (eval temp_record_env default_expr))
-      recover_fn.locals;
 
     let record =
       {
@@ -53,15 +82,14 @@ let reinit_single_node (topology : topology_info) (state : state)
     (prog : program) (node_id : int) continuation : unit =
   let init_fn_name = "Node.BASE_NODE_INIT" in
   let init_fn = Env.find prog.rpc init_fn_name in
-  let env = Env.create 1024 in
+
+  let env =
+    create_initialized_env default_env_size state.nodes.(node_id) [] []
+      init_fn.locals ~context_name:init_fn_name ()
+  in
+  Env.add env "self" (VNode node_id);
 
   let record_env = { local_env = env; node_env = state.nodes.(node_id) } in
-  List.iter
-    (fun (var_name, default_expr) ->
-      Env.add env var_name (eval record_env default_expr))
-    init_fn.locals;
-  Env.add record_env.local_env "self" (VNode node_id);
-
   let _ = exec_sync prog record_env init_fn.entry in
   recover_node_in_topology topology state prog node_id continuation
 
@@ -170,22 +198,9 @@ let force_recover_node (state : state) (prog : program)
 *)
 let schedule_planned_op (state : state) (program : program)
     (operation_id_counter : int ref) (* Must be passed from interp/exec_plan *)
-    (event_id : event_id) (op_spec : client_op_spec)
+    (event_id : event_id) (op_spec : client_op_spec) (client_id : int)
     (op_map : (int, event_id) Hashtbl.t) (plan_engine : PlanEngine.t ref) : unit
     =
-  (* Get a free client *)
-  let client_id =
-    match state.free_clients with
-    | [] ->
-        failwith
-          ("Failed to dispatch event " ^ event_id
-         ^ ": No free clients available.")
-    | hd :: tl ->
-        state.free_clients <- tl;
-        (* *)
-        hd
-  in
-
   (* Generate a new internal operation ID *)
   let new_op_id =
     operation_id_counter := !operation_id_counter + 1;
@@ -207,21 +222,10 @@ let schedule_planned_op (state : state) (program : program)
   in
 
   let op = function_info op_name program in
-  let env = Env.create 1024 in
-  (try
-     List.iter2
-       (fun formal actual -> Env.add env formal actual)
-       op.formals actuals
-   with Invalid_argument _ ->
-     failwith ("Mismatched arguments for planned op: " ^ op_name));
-
-  let temp_record_env =
-    { local_env = env; node_env = state.nodes.(client_id) }
+  let env =
+    create_initialized_env default_env_size state.nodes.(client_id) op.formals
+      actuals op.locals ~context_name:op_name ()
   in
-  List.iter
-    (fun (var_name, default_expr) ->
-      Env.add env var_name (eval temp_record_env default_expr))
-    op.locals;
 
   (* Log the invocation to history *)
   let invocation =
@@ -294,6 +298,7 @@ let exec_plan (state : state) (program : program) (plan : execution_plan)
     (operation_id_counter : int ref) : unit =
   let plan_engine = ref (PlanEngine.create plan) in
   let current_step = ref 0 in
+  let deferred_ops = ref [] in
 
   (* This is the main loop. It runs as long as the plan isn't
      complete, or until we hit the safety timeout. *)
@@ -310,9 +315,25 @@ let exec_plan (state : state) (program : program) (plan : execution_plan)
         Printf.printf "STEP %d: Dispatching event %s\n" !current_step event.id;
 
         match event.action with
-        | ClientRequest op_spec ->
-            schedule_planned_op state program operation_id_counter event.id
-              op_spec in_progress_client_ops plan_engine
+        | ClientRequest op_spec -> (
+            match state.free_clients with
+            | [] ->
+                (* defer this event *)
+                Printf.printf "STEP %d: Deferring event %s (no free clients)\n"
+                  !current_step event.id;
+
+                deferred_ops := event :: !deferred_ops;
+
+                (* Mark it back to Ready in the engine *)
+                plan_engine := PlanEngine.mark_as_ready !plan_engine event.id
+            | client_id :: rest_of_clients ->
+                Printf.printf "STEP %d: Dispatching event %s\n" !current_step
+                  event.id;
+                (* Consume the client *)
+                state.free_clients <- rest_of_clients;
+
+                schedule_planned_op state program operation_id_counter event.id
+                  op_spec client_id in_progress_client_ops plan_engine)
         | CrashNode node_id ->
             force_crash_node state node_id;
             (* This is an instantaneous event, so mark it complete immediately *)

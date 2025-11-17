@@ -68,24 +68,15 @@ let init_topology (topology : topology_info) (global_state : state)
       let init_fn = Env.find prog.rpc init_fn_name in
       for i = 0 to topology.num_servers - 1 do
         let node_id = i in
-        let env = Env.create 1024 in
         let peers_list =
           VList (ref (List.init topology.num_servers (fun j -> VNode j)))
         in
         let actuals = [ VInt node_id; peers_list ] in
-        (try
-           List.iter2
-             (fun formal actual -> Env.add env formal actual)
-             init_fn.formals actuals
-         with Invalid_argument _ ->
-           failwith ("Mismatched arguments for " ^ init_fn_name));
-        let temp_record_env =
-          { local_env = env; node_env = global_state.nodes.(node_id) }
+        let env =
+          create_initialized_env default_env_size
+            global_state.nodes.(node_id)
+            init_fn.formals actuals init_fn.locals ~context_name:init_fn_name ()
         in
-        List.iter
-          (fun (var_name, default_expr) ->
-            Env.add env var_name (eval temp_record_env default_expr))
-          init_fn.locals;
         let record =
           {
             pc = init_fn.entry;
@@ -107,17 +98,16 @@ let init_clients (global_state : state) (prog : program) : unit =
   for i = 0 to num_clients - 1 do
     let client_id = num_servers + i in
     let init_fn = function_info "ClientInterface.BASE_NODE_INIT" prog in
-    let env = Env.create 1024 in
+    let env =
+      create_initialized_env default_env_size
+        global_state.nodes.(client_id)
+        [] [] init_fn.locals ~context_name:"ClientInterface.BASE_NODE_INIT" ()
+    in
+    Env.add env "self" (VNode client_id);
 
     let record_env =
       { local_env = env; node_env = global_state.nodes.(client_id) }
     in
-    List.iter
-      (fun (var_name, default_expr) ->
-        Env.add env var_name (eval record_env default_expr))
-      init_fn.locals;
-    Env.add record_env.local_env "self" (VNode client_id);
-
     let _ = exec_sync prog record_env init_fn.entry in
     ()
   done
@@ -128,17 +118,16 @@ let init_nodes (global_state : state) (prog : program) : unit =
   let init_fn = Env.find prog.rpc init_fn_name in
   for i = 0 to num_servers - 1 do
     let node_id = i in
-    let env = Env.create 1024 in
+    let env =
+      create_initialized_env default_env_size
+        global_state.nodes.(node_id)
+        [] [] init_fn.locals ~context_name:init_fn_name ()
+    in
+    Env.add env "self" (VNode node_id);
 
     let record_env =
       { local_env = env; node_env = global_state.nodes.(node_id) }
     in
-    List.iter
-      (fun (var_name, default_expr) ->
-        Env.add env var_name (eval record_env default_expr))
-      init_fn.locals;
-    Env.add record_env.local_env "self" (VNode node_id);
-
     let _ = exec_sync prog record_env init_fn.entry in
     ()
   done

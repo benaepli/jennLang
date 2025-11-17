@@ -564,10 +564,6 @@ role Node {
 ClientInterface {
     var responses: list<(ClientResponse, string)> = [];
 
-    // Initializes a replica node.
-    func Init() {
-    }
-
     // Sends a new write command to a specific replica, retrying on redirect.
     func Write(dest: Node, key: string, value: string) {
         var current_target: Node = dest;
