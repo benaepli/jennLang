@@ -16,6 +16,8 @@ let rec expr_of_yojson json : expr =
   (* Handle Serde's default for unit variants *)
   | `String "EUnit" -> EUnit
   | `String "ENil" -> ENil
+  | `String "ECreatePromise" -> ECreatePromise
+  | `String "ECreateLock" -> ECreateLock
   (* Handle adjacently tagged variants*)
   | `Assoc [ (key, value) ] -> (
       match key with
@@ -84,6 +86,10 @@ let rec expr_of_yojson json : expr =
           match to_list value with
           | [ e1; e2 ] -> EKeyExists (expr_of_yojson e1, expr_of_yojson e2)
           | _ -> failwith "EKeyExists expects 2 args")
+      | "EMapErase" -> (
+          match to_list value with
+          | [ e1; e2 ] -> EMapErase (expr_of_yojson e1, expr_of_yojson e2)
+          | _ -> failwith "EKeyExists expects 2 args")
       | "EListLen" -> EListLen (expr_of_yojson value)
       | "EListAccess" -> (
           match to_list value with
@@ -133,6 +139,8 @@ let rec expr_of_yojson json : expr =
           match to_list value with
           | [ e1; e2 ] -> ECoalesce (expr_of_yojson e1, expr_of_yojson e2)
           | _ -> failwith "ECoalesce expects 2 args")
+      | "ESome" -> ESome (expr_of_yojson value)
+      | "EIntToString" -> EIntToString (expr_of_yojson value)
       | _ -> failwith ("Unknown expr key: " ^ key))
   (* Handle malformed JSON *)
   | _ ->
@@ -171,6 +179,18 @@ let instr_of_yojson json : instr =
       match to_list value with
       | [ l; r ] -> Copy (lhs_of_yojson l, expr_of_yojson r)
       | _ -> failwith "Instr::Copy expects 2 args")
+  | "Resolve" -> (
+      match to_list value with
+      | [ l; r ] -> Resolve (lhs_of_yojson l, expr_of_yojson r)
+      | _ -> failwith "Instr::Resolve expects 2 args")
+  | "SyncCall" -> (
+      match to_list value with
+      | [ l; f; args ] ->
+          SyncCall
+            ( lhs_of_yojson l,
+              to_string f,
+              List.map expr_of_yojson (to_list args) )
+      | _ -> failwith "Instr::SyncCall expects 3 args")
   | _ -> failwith ("Unknown instr key: " ^ key)
 
 let label_of_yojson json : CFG.vertex label =
@@ -185,6 +205,10 @@ let label_of_yojson json : CFG.vertex label =
       match to_list value with
       | [ l; e; v ] -> Await (lhs_of_yojson l, expr_of_yojson e, to_int v)
       | _ -> failwith "Label::Await expects 3 args")
+  | "SpinAwait" -> (
+      match to_list value with
+      | [ e; v ] -> SpinAwait (expr_of_yojson e, to_int v)
+      | _ -> failwith "Label::SpinAwait expects 2 args")
   | "Return" -> Return (expr_of_yojson value)
   | "Cond" -> (
       match to_list value with
@@ -200,6 +224,14 @@ let label_of_yojson json : CFG.vertex label =
       | [ e; v ] -> Print (expr_of_yojson e, to_int v)
       | _ -> failwith "Label::Print expects 2 args")
   | "Break" -> Break (to_int value)
+  | "Lock" -> (
+      match to_list value with
+      | [ e; v ] -> Lock (expr_of_yojson e, to_int v)
+      | _ -> failwith "Label::Lock expects 2 args")
+  | "Unlock" -> (
+      match to_list value with
+      | [ e; v ] -> Unlock (expr_of_yojson e, to_int v)
+      | _ -> failwith "Label::Unlock expects 2 args")
   | _ -> failwith ("Unknown label key: " ^ key)
 
 let function_info_of_yojson json : function_info =
@@ -214,30 +246,19 @@ let function_info_of_yojson json : function_info =
              | [ name_json; expr_json ] ->
                  (to_string name_json, expr_of_yojson expr_json)
              | _ -> failwith "locals entry must be a [name, expr] pair");
+    is_sync = member "is_sync" json |> to_bool;
   }
 
 let program_of_yojson json : program =
-  (* 1. Parse the CFG (a list of labels) into a BatDynArray *)
   let cfg_list = member "cfg" json |> to_list |> List.map label_of_yojson in
   let cfg_array = BatDynArray.of_list cfg_list in
-
-  (* 2. Parse the RPC map (a JSON object) into an OCaml Hashtbl *)
   let rpc_hashtbl = Env.create (List.length (to_assoc (member "rpc" json))) in
   List.iter
     (fun (key, info_json) ->
       Env.add rpc_hashtbl key (function_info_of_yojson info_json))
     (to_assoc (member "rpc" json));
 
-  (* 3. Parse the client_ops map (a JSON object) into an OCaml Hashtbl *)
-  let client_ops_hashtbl =
-    Env.create (List.length (to_assoc (member "client_ops" json)))
-  in
-  List.iter
-    (fun (key, info_json) ->
-      Env.add client_ops_hashtbl key (function_info_of_yojson info_json))
-    (to_assoc (member "client_ops" json));
-
-  { cfg = cfg_array; rpc = rpc_hashtbl; client_ops = client_ops_hashtbl }
+  { cfg = cfg_array; rpc = rpc_hashtbl }
 
 (**
  * Loads a compiled program from a JSON file.

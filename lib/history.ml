@@ -9,7 +9,7 @@ let rec json_of_value (v : value) : Yojson.Basic.t =
   | VNode n -> `Assoc [ ("type", `String "VNode"); ("value", `Int n) ]
   | VFuture f ->
       let value_json =
-        match !f with Some v -> json_of_value v | None -> `Null
+        match f.value with Some v -> json_of_value v | None -> `Null
       in
       `Assoc [ ("type", `String "VFuture"); ("value", value_json) ]
   | VMap m ->
@@ -33,6 +33,9 @@ let rec json_of_value (v : value) : Yojson.Basic.t =
   | VTuple t ->
       let items_json = Array.to_list t |> List.map json_of_value in
       `Assoc [ ("type", `String "VTuple"); ("value", `List items_json) ]
+  | VLock r ->
+      let value_json = `Bool !r in
+      `Assoc [ ("type", `String "VLock"); ("value", value_json) ]
 
 (* Saves the simulation history to a CSV file *)
 let save_history_to_csv (history : operation DA.t) (filename : string) : unit =

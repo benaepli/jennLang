@@ -128,6 +128,13 @@ class ConstraintsGenerator:
 
             elif action.call == CallType.RESP:
                 print("action.proc", action.proc)
+                # Handle cases where a response might appear without a known invocation
+                if action.proc not in proc2Op:
+                    print(
+                        f"Warning: Response from proc {action.proc} without matching invocation. Skipping."
+                    )
+                    continue
+
                 op = proc2Op[action.proc]
                 op.set_resp(timestamp)
                 if op.cmd == Command.READ:
@@ -237,8 +244,15 @@ class ConstraintsGenerator:
 
         for op_ry in succs:
             if op_ry.cmd == Command.READ:
+                if op_rx not in self.matches or op_ry not in self.matches:
+                    continue
+
                 op_wa = self.matches[op_rx]
                 op_wb = self.matches[op_ry]
+
+                # Don't add self-loop if both reads match the same write
+                if op_wa == op_wb:
+                    continue
 
                 self.successors[op_wa].add(op_wb)
                 self.predecessors[op_wb].add(op_wa)
@@ -258,6 +272,9 @@ class ConstraintsGenerator:
         self.match_all_reads()
         if self.alreadyUNSAT:
             return False
+
+        self.concurrent_writes_ordered_by_reads()
+
         return True
 
 
@@ -285,11 +302,18 @@ def z3solver(cg):
 
     # no intervening writes between matched reads and writes
     for read_op, write_op in cg.matches.items():
+        if read_op not in symbols or write_op not in symbols:
+            continue
+
         for op in successors.keys():
-            if op.cmd is Command.WRITE:
+            if op.cmd is Command.WRITE and op.key == read_op.key and op != write_op:
+                if op not in symbols:
+                    continue
+
                 read_sym = symbols[read_op]
                 write_sym = symbols[write_op]
                 op_sym = symbols[op]
+
                 solver.assert_and_track(
                     Not(And([write_sym < op_sym, op_sym < read_sym])),
                     "intervening write ~({0} < {1} < {2})".format(
@@ -299,8 +323,13 @@ def z3solver(cg):
                 # solver.add(Not(
                 #     And([write_sym < op_sym, op_sym < read_sym])
                 # ))
-    solver.add(Distinct([sym for _, sym in symbols.items()]))
-    solver.add(And([op_sym > 0 for op_sym in symbols.values()]))
+
+    if symbols.values():
+        solver.add(Distinct([sym for _, sym in symbols.items()]))
+        solver.add(And([op_sym > 0 for op_sym in symbols.values()]))
+    else:
+        print("No symbols generated. Skipping solver.")
+        return True, {}
 
     if solver.check() != sat:
         c = solver.unsat_core()
@@ -314,7 +343,7 @@ def z3solver(cg):
 
 def parse_json_value(json_str):
     """
-    Parse a JSON-encoded value from the new CSV format.
+    Parse a JSON-encoded value from the CSV format.
     Returns the actual value from the JSON structure.
     """
     if not json_str or json_str.strip() == "":
@@ -329,42 +358,73 @@ def parse_json_value(json_str):
 
 
 def parseTrace(outfile):
+    """
+    Parses the CSV trace file and converts it into a list of Action objects.
+    """
     actions = []
     with open(outfile, "r") as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
 
-            action = Action(
-                str(row["ClientID"]),
-                CallType.INV if row["Kind"] == "Invocation" else CallType.RESP,
-                None,
-            )
+            client_id = str(row["ClientID"])
+            kind = CallType.INV if row["Kind"] == "Invocation" else CallType.RESP
+            action_name = row["Action"]  # e.g., "34_write", "35_read"
+
+            action = Action(client_id, kind, None)
 
             # Get all payload columns (Payload1, Payload2, etc.)
             payload_values = []
             i = 1
             while f"Payload{i}" in row:
                 val = parse_json_value(row[f"Payload{i}"])
+                # We append None values as they are significant (e.g., VOption(None))
                 if val is not None:
                     payload_values.append(val)
                 i += 1
 
-            if action.call == CallType.INV and "write" in row["Action"]:
-                action.cmd = Command.WRITE
-                # First payload is the key, second is the value
-                action.k = payload_values[0] if len(payload_values) > 0 else None
-                action.val = payload_values[1] if len(payload_values) > 1 else None
-            elif action.call == CallType.RESP and "write" in row["Action"]:
-                action.cmd = Command.OK
-            elif action.call == CallType.INV and "read" in row["Action"]:
-                action.cmd = Command.READ
-                # First payload is the key
-                action.k = payload_values[0] if len(payload_values) > 0 else None
-            elif action.call == CallType.RESP and "read" in row["Action"]:
-                action.cmd = Command.OK
-                # First payload is the return value (node)
-                action.val = payload_values[0] if len(payload_values) > 0 else None
+            if "write" in action_name:
+                if kind == CallType.INV:
+                    action.cmd = Command.WRITE
+                    # Payload1: Node ID (ignored)
+                    # Payload2: Key
+                    # Payload3: Value
+                    action.k = payload_values[1] if len(payload_values) > 1 else None
+                    action.val = payload_values[2] if len(payload_values) > 2 else None
+                elif kind == CallType.RESP:
+                    action.cmd = Command.OK
+                    # No value payload on write response
+
+            elif "read" in action_name:
+                if kind == CallType.INV:
+                    action.cmd = Command.READ
+                    # Payload1: Node ID (ignored)
+                    # Payload2: Key
+                    action.k = payload_values[1] if len(payload_values) > 1 else None
+                elif kind == CallType.RESP:
+                    action.cmd = Command.OK
+                    # Payload1 is the return value
+                    parsed_val = payload_values[0] if len(payload_values) > 0 else None
+
+                    # Handle VOption wrapper, e.g., {"type":"VOption","value":{"type":"VString","value":"val_546"}}
+                    # or {"type":"VOption","value":null}
+                    if (
+                        isinstance(parsed_val, dict)
+                        and "type" in parsed_val
+                        and parsed_val["type"] == "VOption"
+                    ):
+                        parsed_val = parsed_val.get(
+                            "value"
+                        )  # This is now None or {"type":"VString","value":"val_546"}
+
+                    # Handle VString, VInt, etc. wrapper
+                    # e.g., {"type":"VString","value":"val_546"}
+                    if isinstance(parsed_val, dict) and "value" in parsed_val:
+                        action.val = parsed_val["value"]
+                    else:
+                        action.val = parsed_val  # Handles None
+
             else:
+                # Skips "init" actions or others
                 continue
 
             actions.append(action)
@@ -386,10 +446,14 @@ def main():
         print(cg)
         is_sat, solution = z3solver(cg)
         if is_sat:
-            sorted_ops = [
-                str(op) for op, _ in sorted(solution.items(), key=lambda item: item[1])
-            ]
-            print(" < ".join(sorted_ops))
+            if solution:
+                sorted_ops = [
+                    str(op)
+                    for op, _ in sorted(solution.items(), key=lambda item: item[1])
+                ]
+                print(" < ".join(sorted_ops))
+            else:
+                print("SAT (empty or no-op history)")
             return 0
     return -1
 
