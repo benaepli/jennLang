@@ -1,39 +1,52 @@
 open Yojson.Basic.Util
 
-type crash_config = {
-  enable_random_crashes : bool;
-  crash_probability : float;
-      (* per step, per node (e.g., 0.001 = 0.1% chance) *)
-  min_recovery_time : int; (* minimum steps before recovery *)
-  max_recovery_time : int; (* maximum steps before recovery *)
-}
+type range = { min : int; max : int; step : int }
+
+(** Helper to parse a range from JSON, defaulting step to 1 *)
+let read_range json =
+  let min = json |> member "min" |> to_int in
+  let max = json |> member "max" |> to_int in
+  let step =
+    json |> member "step" |> to_int_option |> Option.value ~default:1
+  in
+  if min > max || step <= 0 then
+    failwith "Invalid range: min must be <= max and step must be > 0"
+  else { min; max; step }
 
 type config = {
-  randomly_drop_msgs : bool;
-  cut_tail_from_mid : bool;
-  sever_all_to_tail_but_mid : bool;
-  partition_away_nodes : int list;
+  num_servers_range : range;
+  num_clients_range : range;
+  num_write_ops_range : range;
+  num_read_ops_range : range;
+  num_timeouts_range : range;
+  num_crashes_range : range;
+  dependency_density_values : float list;
   randomly_delay_msgs : bool;
-  crash_config : crash_config;
+  num_runs_per_config : int;
+  max_iterations : int;
+}
+
+type single_run_config = {
+  plan_gen_config : PlanGenerator.generator_config;
+  randomly_delay_msgs : bool;
 }
 
 let read_config_file (filename : string) : config =
   let json = Yojson.Basic.from_file filename in
-  let crash_json = json |> member "crash_config" in
   {
-    randomly_drop_msgs = json |> member "randomly_drop_msgs" |> to_bool;
-    cut_tail_from_mid = json |> member "cut_tail_from_mid" |> to_bool;
-    sever_all_to_tail_but_mid =
-      json |> member "sever_all_to_tail_but_mid" |> to_bool;
-    partition_away_nodes =
-      json |> member "partition_away_nodes" |> to_list |> filter_int;
-    randomly_delay_msgs = json |> member "randomly_delay_msgs" |> to_bool;
-    crash_config =
-      {
-        enable_random_crashes =
-          crash_json |> member "enable_random_crashes" |> to_bool;
-        crash_probability = crash_json |> member "crash_probability" |> to_float;
-        min_recovery_time = crash_json |> member "min_recovery_time" |> to_int;
-        max_recovery_time = crash_json |> member "max_recovery_time" |> to_int;
-      };
+    num_servers_range = json |> member "num_servers" |> read_range;
+    num_clients_range = json |> member "num_clients" |> read_range;
+    num_write_ops_range = json |> member "num_write_ops" |> read_range;
+    num_read_ops_range = json |> member "num_read_ops" |> read_range;
+    num_timeouts_range = json |> member "num_timeouts" |> read_range;
+    num_crashes_range = json |> member "num_crashes" |> read_range;
+    dependency_density_values =
+      json |> member "dependency_density" |> to_list |> filter_float;
+    randomly_delay_msgs =
+      json
+      |> member "randomly_delay_msgs"
+      |> to_bool_option
+      |> Option.value ~default:false;
+    num_runs_per_config = json |> member "num_runs_per_config" |> to_int;
+    max_iterations = json |> member "max_iterations" |> to_int;
   }

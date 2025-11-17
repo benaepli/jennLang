@@ -2,4 +2,4 @@
  (name main)
  (public_name main)
  (libraries yojson mylib)
- (modules main benchmark config))
+ (modules main execution benchmark config plan planGenerator))
