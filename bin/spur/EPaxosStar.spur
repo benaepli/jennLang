@@ -1,0 +1,139 @@
+type Payload {
+    kind: int; // 0: Read, 1: Write
+    key: string;
+    value: string?;
+};
+
+type DependencySet = map<int, bool>;
+
+type Command {
+    payload: Payload;
+    phase: int; // 0: Initial, 1: PreAccepted, 2: Accepted, 3: Committted
+    dependencies: DependencySet;
+    ballot: int;
+    accepted_ballot: int;
+    initial_payload: Payload;
+    initial_dependencies: DependencySet;
+    leader: Node;
+};
+
+type PreAcceptRequest {
+    sender: Node;
+    id: int;
+    payload: Payload;
+    dependencies: DependencySet;
+};
+
+type PreAcceptOKRequest {
+    id: int;
+    dependencies: DependencySet;
+};
+
+
+role Node {
+    // The index of our own node in the replicas list.
+    var self: int = 0;
+    var replicas: list<Node> = [];
+
+    // ID -> Command info.
+    var commands: map<int, Command> = {};
+
+    func Init(me: int, all: list<Node>) {
+        self = me;
+        replicas = all;
+    }
+
+    sync func localConflicts(c: Payload) -> DependencySet {
+        var result: DependencySet = {};
+        for ((id, command) in commands) {
+            var payload: Payload = command.payload;
+            if (payload.kind != 0 or c.kind != 0 and payload.key == c.key) {
+                result[id] = true;
+            }
+        } 
+        return result;
+    }
+
+    sync func union(fst: DependencySet, snd: DependencySet) -> DependencySet {
+        var result: DependencySet = {};
+        for ((id, _) in fst) {
+            result[id] = true;
+        }
+        for ((id, _) in snd) {
+            result[id] = true;
+        }
+        return result;
+    }
+
+
+    // Submit handles starting a new request. Figure 3 of EPaxos*.
+    func Submit(c: Payload, id: int) {
+        var localDeps: DependencySet = localConflicts(c);
+        var request: PreAcceptRequest = PreAcceptRequest{
+            sender: replicas[self],
+            id: id,
+            payload: c,
+            dependencies: localDeps,
+        };
+
+        await PreAccept(request);
+        for (node in replicas) {
+            if (node != replicas[self]) {
+                rpc_call(node, PreAccept(request));
+            }
+        }
+    }
+
+
+    // PreAccept handles an incoming PreAccept request. Figure 3 of EPaxos*.
+    func PreAccept(request: PreAcceptRequest) {
+        // Precondition: we haven't started working on it.
+        if (exists(commands, request.id)) {
+            var command: Command = commands[request.id];
+            if (command.ballot != 0 or command.phase != 0) {
+                return ();
+            }
+        }
+
+        var newConflicts: DependencySet = localConflicts(request.payload);
+        var allConflicts: DependencySet = union(request.dependencies, newConflicts);
+
+        var cmd: Command = Command{
+            payload: request.payload,
+            phase: 1, // PreAccepted
+            dependencies: allConflicts,
+            ballot: 0,
+            accepted_ballot: 0,
+            initial_payload: request.payload,
+            initial_dependencies: allConflicts,
+            leader: request.sender,
+        };
+        commands[request.id] = cmd;
+
+        rpc_call(request.sender, PreAcceptOK(
+            PreAcceptOKRequest{
+                id: request.id,
+                dependencies: allConflicts,
+            }
+        ));
+    }
+
+    func preAcceptOKWithQuorum(id: int) {
+
+    }
+
+    func PreAcceptOK(request: PreAcceptOKRequest) {
+        
+    }
+}
+
+ClientInterface {
+    func Read(dest: Node, key: string) -> string? {
+        // TODO: Implement
+        return nil;
+    }
+
+    func Write(dest: Node, key: string, value: string) {
+        // TODO: Implement
+    }
+}
