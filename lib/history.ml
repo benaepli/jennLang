@@ -1,4 +1,5 @@
 open Simulator
+open Sqlite3
 
 (* Helper to convert a value to its Yojson representation *)
 let rec json_of_value (v : value) : Yojson.Basic.t =
@@ -39,18 +40,9 @@ let rec json_of_value (v : value) : Yojson.Basic.t =
 
 (* Saves the simulation history to a CSV file *)
 let save_history_to_csv (history : operation DA.t) (filename : string) : unit =
-  (* Find the maximum payload length to create a non-ragged CSV *)
-  let max_payload_len =
-    DA.fold_left
-      (fun max_len op -> max max_len (List.length op.payload))
-      0 history
-  in
+  (* Create header with single Payload column *)
+  let header = [ "UniqueID"; "ClientID"; "Kind"; "Action"; "Payload" ] in
 
-  (* Create a dynamic header based on the max payload size *)
-  let payload_headers =
-    List.init max_payload_len (fun i -> "Payload" ^ string_of_int (i + 1))
-  in
-  let header = [ "UniqueID"; "ClientID"; "Kind"; "Action" ] @ payload_headers in
   (* Map all history operations to a list of string lists (rows) *)
   let rows =
     DA.fold_left
@@ -65,20 +57,13 @@ let save_history_to_csv (history : operation DA.t) (filename : string) : unit =
         let unique_id = string_of_int op.unique_id in
         let base_row = [ unique_id; client_id; kind; action ] in
 
-        (* Convert payload to list of JSON strings using the new helper *)
-        let payload_strings =
-          List.map
-            (fun v -> json_of_value v |> Yojson.Basic.to_string)
-            op.payload
+        (* Convert entire payload to a single JSON array string *)
+        let payload_json_array =
+          List.map json_of_value op.payload |> fun json_list ->
+          `List json_list |> Yojson.Basic.to_string
         in
 
-        (* Pad the row with empty strings to match the header width *)
-        let padding =
-          List.init
-            (max_payload_len - List.length payload_strings)
-            (fun _ -> "")
-        in
-        let full_row = base_row @ payload_strings @ padding in
+        let full_row = base_row @ [ payload_json_array ] in
 
         (* Prepend the new row to the accumulator *)
         full_row :: acc)
@@ -90,3 +75,64 @@ let save_history_to_csv (history : operation DA.t) (filename : string) : unit =
   let all_rows = header :: List.rev rows in
 
   Csv.save filename all_rows
+
+(* Initialize the SQLite database with the required tables *)
+let init_sqlite (db : db) : unit =
+  let create_runs =
+    "CREATE TABLE IF NOT EXISTS runs ( run_id INTEGER PRIMARY KEY, start_time \
+     DATETIME DEFAULT CURRENT_TIMESTAMP, meta_info TEXT );"
+  in
+  let create_executions =
+    "CREATE TABLE IF NOT EXISTS executions ( run_id INTEGER REFERENCES \
+     runs(run_id), unique_id INTEGER, client_id INTEGER, kind TEXT, action \
+     TEXT, payload JSON );"
+  in
+  let create_index =
+    "CREATE INDEX IF NOT EXISTS idx_run_execution ON executions(run_id, \
+     unique_id);"
+  in
+  ignore (exec db create_runs);
+  ignore (exec db create_executions);
+  ignore (exec db create_index)
+
+(* Saves the simulation history to the SQLite database *)
+let save_history (db : db) (run_id : int) (history : operation DA.t) : unit =
+  (* Insert run record *)
+  let insert_run =
+    Printf.sprintf "INSERT INTO runs (run_id) VALUES (%d);" run_id
+  in
+  ignore (exec db insert_run);
+
+  (* Bulk insert executions *)
+  ignore (exec db "BEGIN TRANSACTION;");
+  let stmt =
+    prepare db
+      "INSERT INTO executions (run_id, unique_id, client_id, kind, action, \
+       payload) VALUES (?, ?, ?, ?, ?, ?)"
+  in
+
+  DA.iter
+    (fun op ->
+      ignore (reset stmt);
+      ignore (bind stmt 1 (Sqlite3.Data.INT (Int64.of_int run_id)));
+      ignore (bind stmt 2 (Sqlite3.Data.INT (Int64.of_int op.unique_id)));
+      ignore (bind stmt 3 (Sqlite3.Data.INT (Int64.of_int op.client_id)));
+
+      let kind =
+        match op.kind with Response -> "Response" | Invocation -> "Invocation"
+      in
+      ignore (bind stmt 4 (Sqlite3.Data.TEXT kind));
+
+      ignore (bind stmt 5 (Sqlite3.Data.TEXT op.op_action));
+
+      let payload_json_array =
+        List.map json_of_value op.payload |> fun json_list ->
+        `List json_list |> Yojson.Basic.to_string
+      in
+      ignore (bind stmt 6 (Sqlite3.Data.TEXT payload_json_array));
+
+      ignore (step stmt))
+    history;
+
+  ignore (finalize stmt);
+  ignore (exec db "COMMIT;")

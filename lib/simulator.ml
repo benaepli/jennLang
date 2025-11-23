@@ -487,7 +487,7 @@ type operation = {
 }
 
 type crash_info = {
-  mutable currently_crashed : int list;
+  mutable currently_crashed : BatSet.Int.t;
   mutable recovery_schedule : (int * int) list; (* (node_id, recover_at_step) *)
   mutable current_step : int;
   mutable queued_messages : (int * record) list;
@@ -496,7 +496,7 @@ type crash_info = {
 (* Global state *)
 type state = {
   nodes : value Env.t array;
-  mutable runnable_records : record list;
+  mutable runnable_records : record DA.t;
   mutable waiting_records : record list;
   history : operation DA.t;
   mutable free_clients :
@@ -1110,14 +1110,14 @@ let exec (state : state) (program : program) (record : record) =
                   }
                 in
                 store lhs (VFuture new_future) env;
-                if List.mem node_id state.crash_info.currently_crashed then (
+                if BatSet.Int.mem node_id state.crash_info.currently_crashed
+                then (
                   Printf.printf
                     "Queueing new message from %d to crashed node %d (from exec)\n"
                     record.node node_id;
                   state.crash_info.queued_messages <-
                     (node_id, new_record) :: state.crash_info.queued_messages)
-                else
-                  state.runnable_records <- new_record :: state.runnable_records
+                else DA.add state.runnable_records new_record
             | other ->
                 failwith
                   (Printf.sprintf "Type error: expected node for RPC, got %s"
@@ -1213,7 +1213,9 @@ let exec (state : state) (program : program) (record : record) =
                   record.pc <- next;
                   store lhs value env;
 
-                  if List.mem record.node state.crash_info.currently_crashed
+                  if
+                    BatSet.Int.mem record.node
+                      state.crash_info.currently_crashed
                   then (
                     (* Node is crashed: Queue for recovery *)
                     Printf.printf
@@ -1223,7 +1225,7 @@ let exec (state : state) (program : program) (record : record) =
                       (record.node, record) :: state.crash_info.queued_messages)
                   else
                     (* Node is alive: Add back to runnable records *)
-                    state.runnable_records <- record :: state.runnable_records
+                    DA.add state.runnable_records record
                 in
                 fut.waiters <- resume_callback :: fut.waiters;
                 state.waiting_records <- record :: state.waiting_records)
@@ -1239,7 +1241,7 @@ let exec (state : state) (program : program) (record : record) =
               loop ())
             else
               (* Still waiting. *)
-              state.runnable_records <- record :: state.runnable_records
+              DA.add state.runnable_records record
         | other ->
             failwith
               (Printf.sprintf "Type error in SpinAwait: expected bool, got %s"
@@ -1247,7 +1249,7 @@ let exec (state : state) (program : program) (record : record) =
     | Return expr -> record.continuation (eval env expr)
     | Pause next ->
         record.pc <- next;
-        state.runnable_records <- record :: state.runnable_records
+        DA.add state.runnable_records record
     | ForLoopIn (lhs, expr, body, next) -> (
         match eval env expr with
         | VMap map -> (
@@ -1340,7 +1342,7 @@ let exec (state : state) (program : program) (record : record) =
           loop ())
         else
           (* Lock is held, re-queue the record to wait *)
-          state.runnable_records <- record :: state.runnable_records
+          DA.add state.runnable_records record
     | Unlock (lock_expr, next) ->
         let lock_ref = expect_lock (eval env lock_expr) in
         if !lock_ref = true then (
@@ -1362,83 +1364,86 @@ let schedule_record (state : state) (program : program)
     Printf.printf "%b %b %b %b\n" randomly_drop_msgs cut_tail_from_mid
       sever_all_but_mid
       (List.length partition_away_nodes = 0);
-  let rec pick n before after =
-    match after with
-    | [] -> raise Halt
-    | r :: rs ->
-        if List.mem r.node state.crash_info.currently_crashed then
-          (* This should never happen *)
-          let _ =
-            Printf.printf "Failure: source %d for dst %d \n" r.origin_node
-              r.node
-          in
-          state.runnable_records <- List.rev_append before rs
-        else if n == 0 then (
-          let env = { local_env = r.env; node_env = state.nodes.(r.node) } in
-          state.runnable_records <- List.rev_append before rs;
-          match CFG.label program.cfg r.pc with
-          | Instr (i, _) -> (
-              match i with
-              | Async (_, node, _, _) ->
-                  let node_id = expect_node (eval env node) in
-                  let src_node = r.node in
-                  let dest_node = node_id in
 
-                  (* If destination is crashed, queue the message *)
-                  if List.mem dest_node state.crash_info.currently_crashed then (
-                    Printf.printf
-                      "  Queueing message from %d to crashed node %d (step %d)\n"
-                      src_node dest_node state.crash_info.current_step;
-                    state.crash_info.queued_messages <-
-                      (dest_node, r) :: state.crash_info.queued_messages)
-                  else
-                    let should_execute = ref true in
+  let len = DA.length state.runnable_records in
+  if len = 0 then raise Halt;
 
-                    (* Only apply fault injection to non-local calls *)
-                    if src_node <> dest_node then (
-                      if
-                        randomly_drop_msgs
-                        &&
-                        (Random.self_init ();
-                         Random.float 1.0 < 0.3)
-                      then should_execute := false;
-
-                      if
-                        cut_tail_from_mid
-                        && ((src_node = 2 && dest_node = 1)
-                           || (dest_node = 2 && src_node = 1))
-                      then should_execute := false;
-
-                      if sever_all_but_mid then
-                        if dest_node = 2 && not (src_node = 1) then
-                          should_execute := false
-                        else if src_node = 2 && not (dest_node = 1) then
-                          should_execute := false;
-
-                      if
-                        List.mem src_node partition_away_nodes
-                        || List.mem dest_node partition_away_nodes
-                      then should_execute := false;
-
-                      if randomly_delay_msgs then
-                        if
-                          Random.self_init ();
-                          Random.float 1.0 < r.x
-                        then (
-                          r.x <- r.f r.x;
-                          should_execute := false));
-
-                    if !should_execute then exec state program r
-              | _ -> exec state program r)
-          | _ -> exec state program r)
-        else pick (n - 1) (r :: before) rs
-  in
   let idx =
     Random.self_init ();
-    Random.int (List.length state.runnable_records)
+    Random.int len
   in
-  let chosen_idx = idx in
-  pick chosen_idx [] state.runnable_records
+
+  (* Swap-remove: move the chosen record to the end, then pop it *)
+  let r = DA.get state.runnable_records idx in
+  let last_idx = len - 1 in
+  (if idx <> last_idx then
+     let last = DA.get state.runnable_records last_idx in
+     DA.set state.runnable_records idx last);
+  DA.delete_last state.runnable_records;
+
+  if BatSet.Int.mem r.node state.crash_info.currently_crashed then
+    (* This should never happen *)
+    let _ =
+      Printf.printf "Failure: source %d for dst %d \n" r.origin_node r.node
+    in
+    () (* Record is already removed, just drop it *)
+  else
+    let env = { local_env = r.env; node_env = state.nodes.(r.node) } in
+    match CFG.label program.cfg r.pc with
+    | Instr (i, _) -> (
+        match i with
+        | Async (_, node, _, _) ->
+            let node_id = expect_node (eval env node) in
+            let src_node = r.node in
+            let dest_node = node_id in
+
+            (* If destination is crashed, queue the message *)
+            if BatSet.Int.mem dest_node state.crash_info.currently_crashed then (
+              Printf.printf
+                "  Queueing message from %d to crashed node %d (step %d)\n"
+                src_node dest_node state.crash_info.current_step;
+              state.crash_info.queued_messages <-
+                (dest_node, r) :: state.crash_info.queued_messages)
+            else
+              let should_execute = ref true in
+
+              (* Only apply fault injection to non-local calls *)
+              if src_node <> dest_node then (
+                if
+                  randomly_drop_msgs
+                  &&
+                  (Random.self_init ();
+                   Random.float 1.0 < 0.3)
+                then should_execute := false;
+
+                if
+                  cut_tail_from_mid
+                  && ((src_node = 2 && dest_node = 1)
+                     || (dest_node = 2 && src_node = 1))
+                then should_execute := false;
+
+                if sever_all_but_mid then
+                  if dest_node = 2 && not (src_node = 1) then
+                    should_execute := false
+                  else if src_node = 2 && not (dest_node = 1) then
+                    should_execute := false;
+
+                if
+                  List.mem src_node partition_away_nodes
+                  || List.mem dest_node partition_away_nodes
+                then should_execute := false;
+
+                if randomly_delay_msgs then
+                  if
+                    Random.self_init ();
+                    Random.float 1.0 < r.x
+                  then (
+                    r.x <- r.f r.x;
+                    should_execute := false));
+
+              if !should_execute then exec state program r
+        | _ -> exec state program r)
+    | _ -> exec state program r
 
 (* Helper function to schedule a thread *)
 let schedule_thread (state : state) (program : program) (func_name : string)
@@ -1502,7 +1507,7 @@ let schedule_thread (state : state) (program : program) (func_name : string)
           in
           update_free_threads (List.rev_append before cs);
           DA.add state.history invocation;
-          state.runnable_records <- record :: state.runnable_records)
+          DA.add state.runnable_records record)
         else pick (n - 1) (c :: before) cs
   in
   pick

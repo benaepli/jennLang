@@ -5,6 +5,7 @@ module Benchmark = Benchmark
 open Config
 open Execution
 open PlanGenerator
+open Sqlite3
 
 let num_sys_threads (num_servers : int) = num_servers * 3
 
@@ -15,13 +16,13 @@ let create_fresh_global_state (num_servers : int) (num_clients : int) : state =
       Array.init
         (num_servers + num_clients + num_sys_threads num_servers)
         (fun _ -> Env.create 1024);
-    runnable_records = [];
+    runnable_records = DA.create ();
     waiting_records = [];
     history = DA.create ();
     free_clients = List.init num_clients (fun i -> num_servers + i);
     crash_info =
       {
-        currently_crashed = [];
+        currently_crashed = BatSet.Int.empty;
         recovery_schedule = [];
         current_step = 0;
         queued_messages = [];
@@ -30,7 +31,7 @@ let create_fresh_global_state (num_servers : int) (num_clients : int) : state =
 
 let sync_exec (global_state : state) (prog : program)
     (randomly_delay_msgs : bool) : unit =
-  while not (List.length global_state.runnable_records = 0) do
+  while not (DA.length global_state.runnable_records = 0) do
     schedule_record global_state prog false false false [] randomly_delay_msgs
   done
 
@@ -91,7 +92,7 @@ let init_topology (topology : topology_info) (global_state : state)
             f = (fun x -> x);
           }
         in
-        global_state.runnable_records <- record :: global_state.runnable_records;
+        DA.add global_state.runnable_records record;
         sync_exec global_state prog false
       done
   | _ -> raise (Failure "Invalid topology")
@@ -138,7 +139,7 @@ let init_nodes (global_state : state) (prog : program) (num_servers : int) :
   done
 
 (** Main interpreter function that runs a single simulation *)
-let interp (compiled_json : string) (intermediate_output : string)
+let interp (compiled_json : string) (db : db) (run_id : int)
     (run_config : single_run_config) (max_iterations : int) : unit =
   let gen_config = run_config.plan_gen_config in
   let randomly_delay_msgs = run_config.randomly_delay_msgs in
@@ -164,7 +165,7 @@ let interp (compiled_json : string) (intermediate_output : string)
   exec_plan fresh_state prog test_plan max_iterations topology
     operation_id_counter randomly_delay_msgs;
 
-  save_history_to_csv fresh_state.history intermediate_output;
+  save_history db run_id fresh_state.history;
   print_global_nodes fresh_state.nodes
 
 (** Helper to create a list of ints from a range *)
@@ -230,6 +231,10 @@ let () =
   let config_counter = ref 0 in
   let run_counter = ref 0 in
 
+  let db_file = Filename.concat output_dir "output.db" in
+  let db = db_open db_file in
+  init_sqlite db;
+
   (* Start the exploration loops (nested) *)
   List.iter
     (fun num_servers ->
@@ -275,24 +280,16 @@ let () =
                                 }
                               in
 
-                              (* Run N times for *this* specific config *)
                               for i = 1 to config.num_runs_per_config do
                                 incr run_counter;
-                                let output_file =
-                                  Filename.concat output_dir
-                                    (Printf.sprintf "%04d_%s_run%d.csv"
-                                       !run_counter config_name i)
-                                in
-                                Printf.printf
-                                  " Run %d/%d (overall #%d) -> %s %!" i
-                                  config.num_runs_per_config !run_counter
-                                  output_file;
+                                Printf.printf " Run %d/%d (overall #%d) %!" i
+                                  config.num_runs_per_config !run_counter;
 
                                 let start_time = Unix.gettimeofday () in
                                 try
                                   (* Run the simulation *)
-                                  interp compiled_json output_file run_config
-                                    config.max_iterations;
+                                  interp compiled_json db !run_counter
+                                    run_config config.max_iterations;
 
                                   let end_time = Unix.gettimeofday () in
                                   Printf.printf " Success (%.4fs)\n"
@@ -312,4 +309,5 @@ let () =
         all_clients)
     all_servers;
 
+  ignore (db_close db);
   print_endline "\nExecution explorer finished."

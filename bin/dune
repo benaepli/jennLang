@@ -1,5 +1,5 @@
 (executable
  (name main)
  (public_name main)
- (libraries yojson mylib)
+ (libraries yojson mylib sqlite3)
  (modules main execution benchmark config plan planGenerator))

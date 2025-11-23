@@ -99,29 +99,35 @@ let force_crash_node (state : state) (node_id : int) : unit =
   let ci = state.crash_info in
 
   (* Don't crash a node that is already crashed *)
-  if List.mem node_id ci.currently_crashed then (
+  if BatSet.Int.mem node_id ci.currently_crashed then (
     Printf.printf "WARN: Request to crash node %d, which is already crashed.\n"
       node_id;
     ())
   else (
-    Printf.printf "CRASH: Forcing crash of node %d at step %d\n" node_id
-      ci.current_step;
-
-    ci.currently_crashed <- node_id :: ci.currently_crashed;
+    (* Printf.printf "CRASH: Forcing crash of node %d at step %d\n" node_id
+      ci.current_step; *)
+    ci.currently_crashed <- BatSet.Int.add node_id ci.currently_crashed;
 
     (* Partition runnable and waiting records for the crashed node *)
-    let all_tasks_on_crashed_node, remaining_runnable =
-      List.partition (fun r -> r.node = node_id) state.runnable_records
-    in
+    (* For DA, we need to extract the ones to crash and keep the rest *)
+    let all_tasks_on_crashed_node = ref [] in
+    let new_runnable = DA.create () in
+    DA.iter
+      (fun r ->
+        if r.node = node_id then
+          all_tasks_on_crashed_node := r :: !all_tasks_on_crashed_node
+        else DA.add new_runnable r)
+      state.runnable_records;
+    state.runnable_records <- new_runnable;
+
     let waiting_tasks_on_crashed_node, remaining_waiting =
       List.partition (fun r -> r.node = node_id) state.waiting_records
     in
 
-    state.runnable_records <- remaining_runnable;
     state.waiting_records <- remaining_waiting;
 
     let all_pending_tasks =
-      all_tasks_on_crashed_node @ waiting_tasks_on_crashed_node
+      !all_tasks_on_crashed_node @ waiting_tasks_on_crashed_node
     in
 
     (* Partition tasks: queue external RPCs, drop local tasks *)
@@ -130,7 +136,7 @@ let force_crash_node (state : state) (node_id : int) : unit =
         (fun r ->
           let is_external = r.origin_node <> r.node in
           let origin_is_alive =
-            not (List.mem r.origin_node ci.currently_crashed)
+            not (BatSet.Int.mem r.origin_node ci.currently_crashed)
           in
           is_external && origin_is_alive)
         all_pending_tasks
@@ -153,13 +159,13 @@ let force_recover_node (state : state) (prog : program)
   let ci = state.crash_info in
 
   (* Only recover nodes that are actually crashed *)
-  if not (List.mem node_id ci.currently_crashed) then (
+  if not (BatSet.Int.mem node_id ci.currently_crashed) then (
     Printf.printf "WARN: Request to recover node %d, which is not crashed.\n"
       node_id;
     () (* Do nothing *))
   else (
-    Printf.printf "RECOVER: Forcing recovery of node %d at step %d\n" node_id
-      ci.current_step;
+    (* Printf.printf "RECOVER: Forcing recovery of node %d at step %d\n" node_id
+      ci.current_step; *)
 
     (* Reset node to fresh state *)
     state.nodes.(node_id) <- Env.create 1024;
@@ -168,8 +174,7 @@ let force_recover_node (state : state) (prog : program)
     reinit_single_node topology state prog node_id (fun () -> ());
 
     (* Remove from crashed list *)
-    ci.currently_crashed <-
-      List.filter (fun n -> n <> node_id) ci.currently_crashed;
+    ci.currently_crashed <- BatSet.Int.remove node_id ci.currently_crashed;
 
     (* Find all queued messages for this node *)
     let queued_for_node, remaining_queue =
@@ -183,8 +188,7 @@ let force_recover_node (state : state) (prog : program)
 
     (* Add all queued messages back to the runnable list *)
     List.iter
-      (fun (_, record) ->
-        state.runnable_records <- record :: state.runnable_records)
+      (fun (_, record) -> DA.add state.runnable_records record)
       queued_for_node)
 
 (**
@@ -265,8 +269,9 @@ let schedule_planned_op (state : state) (program : program)
     (* Mark the event as complete in the engine *)
     plan_engine :=
       PlanEngine.mark_event_completed !plan_engine completed_event_id;
-    Printf.printf " Completed client op %s (ID: %d)\n" completed_event_id
-      new_op_id;
+
+    (* Printf.printf " Completed client op %s (ID: %d)\n" completed_event_id
+      new_op_id; *)
 
     (* Return the client to the free pool *)
     state.free_clients <- client_id :: state.free_clients;
@@ -289,9 +294,9 @@ let schedule_planned_op (state : state) (program : program)
       f = (fun x -> x);
     }
   in
-  state.runnable_records <- record :: state.runnable_records;
-  Printf.printf " Dispatched client op %s (ID: %d) on client %d\n" event_id
-    new_op_id client_id
+  DA.add state.runnable_records record
+(* Printf.printf "Dispatched client op %s (ID: %d) on client %d\n" event_id
+    new_op_id client_id *)
 
 let exec_plan (state : state) (program : program) (plan : execution_plan)
     (max_iterations : int) (topology : topology_info)
@@ -312,23 +317,21 @@ let exec_plan (state : state) (program : program) (plan : execution_plan)
 
     List.iter
       (fun (event : planned_event) ->
-        Printf.printf "STEP %d: Dispatching event %s\n" !current_step event.id;
-
+        (* Printf.printf "STEP %d: Dispatching event %s\n" !current_step event.id; *)
         match event.action with
         | ClientRequest op_spec -> (
             match state.free_clients with
             | [] ->
                 (* defer this event *)
-                Printf.printf "STEP %d: Deferring event %s (no free clients)\n"
-                  !current_step event.id;
-
+                (* Printf.printf "STEP %d: Deferring event %s (no free clients)\n"
+                  !current_step event.id; *)
                 deferred_ops := event :: !deferred_ops;
 
                 (* Mark it back to Ready in the engine *)
                 plan_engine := PlanEngine.mark_as_ready !plan_engine event.id
             | client_id :: rest_of_clients ->
-                Printf.printf "STEP %d: Dispatching event %s\n" !current_step
-                  event.id;
+                (* Printf.printf "STEP %d: Dispatching event %s\n" !current_step
+                  event.id; *)
                 (* Consume the client *)
                 state.free_clients <- rest_of_clients;
 
@@ -344,7 +347,7 @@ let exec_plan (state : state) (program : program) (plan : execution_plan)
       ready_events;
 
     (* Run the Simulator's async "network" for one step *)
-    if List.length state.runnable_records > 0 then
+    if DA.length state.runnable_records > 0 then
       schedule_record state program false false false []
         randomly_delay_msgs (* Disable all random fault injection *)
     else
