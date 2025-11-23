@@ -1,6 +1,10 @@
 open Plan
 open Mylib.Simulator
 
+let src = Logs.Src.create "execution" ~doc:"Execution logs"
+
+module Log = (val Logs.src_log src : Logs.LOG)
+
 let default_env_size = 1024
 
 type topology_info = { topology : string; num_servers : int }
@@ -27,7 +31,7 @@ let create_initialized_env (env_size : int) (node_env : 'a Env.t)
      List.iter2 (fun formal actual -> Env.add env formal actual) formals actuals
    with Invalid_argument _ ->
      failwith
-       (Printf.sprintf "Mismatched arguments for %s: expected %d, got %d"
+       (Format.asprintf "Mismatched arguments for %s: expected %d, got %d"
           context_name (List.length formals) (List.length actuals)));
 
   (* Evaluate and add local variables *)
@@ -44,7 +48,7 @@ let recover_node_in_topology (topology : topology_info) (state : state)
   let recover_fn_name = "Node.RecoverInit" in
 
   if Env.mem prog.rpc recover_fn_name then (
-    Printf.printf "Found recover function: %s\n" recover_fn_name;
+    Log.info (fun m -> m "Found recover function: %s" recover_fn_name);
     let recover_fn = Env.find prog.rpc recover_fn_name in
 
     let actuals =
@@ -100,12 +104,12 @@ let force_crash_node (state : state) (node_id : int) : unit =
 
   (* Don't crash a node that is already crashed *)
   if BatSet.Int.mem node_id ci.currently_crashed then (
-    Printf.printf "WARN: Request to crash node %d, which is already crashed.\n"
-      node_id;
+    Log.warn (fun m ->
+        m "Request to crash node %d, which is already crashed." node_id);
     ())
   else (
-    (* Printf.printf "CRASH: Forcing crash of node %d at step %d\n" node_id
-      ci.current_step; *)
+    Log.debug (fun m ->
+        m "Crash: Forcing crash of node %d at step %d" node_id ci.current_step);
     ci.currently_crashed <- BatSet.Int.add node_id ci.currently_crashed;
 
     (* Partition runnable and waiting records for the crashed node *)
@@ -145,12 +149,13 @@ let force_crash_node (state : state) (node_id : int) : unit =
     (* Queue the external tasks for redelivery upon recovery *)
     let messages_to_queue = List.map (fun r -> (node_id, r)) tasks_to_queue in
 
-    Printf.printf
-      "Dropping %d local tasks and queuing %d external tasks from crashed node \
-       %d\n"
-      (List.length tasks_to_drop)
-      (List.length messages_to_queue)
-      node_id;
+    Log.info (fun m ->
+        m
+          "Dropping %d local tasks and queuing %d external tasks from crashed \
+           node %d"
+          (List.length tasks_to_drop)
+          (List.length messages_to_queue)
+          node_id);
 
     ci.queued_messages <- messages_to_queue @ ci.queued_messages)
 
@@ -160,12 +165,13 @@ let force_recover_node (state : state) (prog : program)
 
   (* Only recover nodes that are actually crashed *)
   if not (BatSet.Int.mem node_id ci.currently_crashed) then (
-    Printf.printf "WARN: Request to recover node %d, which is not crashed.\n"
-      node_id;
+    Log.warn (fun m ->
+        m "Request to recover node %d, which is not crashed." node_id);
     () (* Do nothing *))
   else (
-    (* Printf.printf "RECOVER: Forcing recovery of node %d at step %d\n" node_id
-      ci.current_step; *)
+    Log.debug (fun m ->
+        m "Recover: Forcing recovery of node %d at step %d" node_id
+          ci.current_step);
 
     (* Reset node to fresh state *)
     state.nodes.(node_id) <- Env.create 1024;
@@ -182,9 +188,10 @@ let force_recover_node (state : state) (prog : program)
     in
     ci.queued_messages <- remaining_queue;
 
-    Printf.printf "Delivering %d queued messages to recovered node %d\n"
-      (List.length queued_for_node)
-      node_id;
+    Log.info (fun m ->
+        m "Delivering %d queued messages to recovered node %d"
+          (List.length queued_for_node)
+          node_id);
 
     (* Add all queued messages back to the runnable list *)
     List.iter
@@ -270,8 +277,8 @@ let schedule_planned_op (state : state) (program : program)
     plan_engine :=
       PlanEngine.mark_event_completed !plan_engine completed_event_id;
 
-    (* Printf.printf " Completed client op %s (ID: %d)\n" completed_event_id
-      new_op_id; *)
+    Log.debug (fun m ->
+        m " Completed client op %s (ID: %d)" completed_event_id new_op_id);
 
     (* Return the client to the free pool *)
     state.free_clients <- client_id :: state.free_clients;
@@ -295,7 +302,7 @@ let schedule_planned_op (state : state) (program : program)
     }
   in
   DA.add state.runnable_records record
-(* Printf.printf "Dispatched client op %s (ID: %d) on client %d\n" event_id
+(* Log.debug (fun m -> m "Dispatched client op %s (ID: %d) on client %d" event_id
     new_op_id client_id *)
 
 let exec_plan (state : state) (program : program) (plan : execution_plan)
@@ -317,21 +324,23 @@ let exec_plan (state : state) (program : program) (plan : execution_plan)
 
     List.iter
       (fun (event : planned_event) ->
-        (* Printf.printf "STEP %d: Dispatching event %s\n" !current_step event.id; *)
+        Log.debug (fun m ->
+            m "Step %d: Dispatching event %s" !current_step event.id);
         match event.action with
         | ClientRequest op_spec -> (
             match state.free_clients with
             | [] ->
                 (* defer this event *)
-                (* Printf.printf "STEP %d: Deferring event %s (no free clients)\n"
-                  !current_step event.id; *)
+                Log.debug (fun m ->
+                    m "Step %d: Deferring event %s (no free clients)"
+                      !current_step event.id);
                 deferred_ops := event :: !deferred_ops;
 
                 (* Mark it back to Ready in the engine *)
                 plan_engine := PlanEngine.mark_as_ready !plan_engine event.id
             | client_id :: rest_of_clients ->
-                (* Printf.printf "STEP %d: Dispatching event %s\n" !current_step
-                  event.id; *)
+                Log.debug (fun m ->
+                    m "STEP %d: Dispatching event %s" !current_step event.id);
                 (* Consume the client *)
                 state.free_clients <- rest_of_clients;
 
@@ -358,7 +367,7 @@ let exec_plan (state : state) (program : program) (plan : execution_plan)
     current_step := !current_step + 1
   done;
 
-  Printf.printf "Execution plan completed in %d steps.\n" !current_step;
+  Log.info (fun m -> m "Execution plan completed in %d steps." !current_step);
   if !current_step >= max_iterations then
-    Printf.printf "WARNING: Hit max iterations (%d) before plan completion.\n"
-      max_iterations
+    Log.warn (fun m ->
+        m "Hit max iterations (%d) before plan completion." max_iterations)

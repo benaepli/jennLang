@@ -1,5 +1,9 @@
 module DA = BatDynArray
 
+let src = Logs.Src.create "simulator" ~doc:"Simulator logs"
+
+module Log = (val Logs.src_log src : Logs.LOG)
+
 type expr =
   | EVar of string
   | EFind of expr * expr
@@ -185,69 +189,71 @@ let expect_int v =
   match v with
   | VInt i -> i
   | _ ->
-      failwith (Printf.sprintf "Type error: expected int, got %s" (type_name v))
+      failwith
+        (Format.asprintf "Type error: expected int, got %s" (type_name v))
 
 let expect_bool v =
   match v with
   | VBool b -> b
   | _ ->
       failwith
-        (Printf.sprintf "Type error: expected bool, got %s" (type_name v))
+        (Format.asprintf "Type error: expected bool, got %s" (type_name v))
 
 let expect_node v =
   match v with
   | VNode n | VInt n -> n
   | _ ->
       failwith
-        (Printf.sprintf "Type error: expected node/int, got %s" (type_name v))
+        (Format.asprintf "Type error: expected node/int, got %s" (type_name v))
 
 let expect_map v =
   match v with
   | VMap m -> m
   | _ ->
-      failwith (Printf.sprintf "Type error: expected map, got %s" (type_name v))
+      failwith
+        (Format.asprintf "Type error: expected map, got %s" (type_name v))
 
 let expect_list v =
   match v with
   | VList l -> l
   | _ ->
       failwith
-        (Printf.sprintf "Type error: expected list, got %s" (type_name v))
+        (Format.asprintf "Type error: expected list, got %s" (type_name v))
 
 let expect_future v =
   match v with
   | VFuture f -> f
   | _ ->
       failwith
-        (Printf.sprintf "Type error: expected future, got %s" (type_name v))
+        (Format.asprintf "Type error: expected future, got %s" (type_name v))
 
 let expect_lock v =
   match v with
   | VLock l -> l
   | _ ->
       failwith
-        (Printf.sprintf "Type error: expected lock, got %s" (type_name v))
+        (Format.asprintf "Type error: expected lock, got %s" (type_name v))
 
 let expect_tuple v =
   match v with
   | VTuple arr -> arr
   | _ ->
       failwith
-        (Printf.sprintf "Type error: expected tuple, got %s" (type_name v))
+        (Format.asprintf "Type error: expected tuple, got %s" (type_name v))
 
 let expect_option v =
   match v with
   | VOption o -> o
   | _ ->
       failwith
-        (Printf.sprintf "Type error: expected option, got %s" (type_name v))
+        (Format.asprintf "Type error: expected option, got %s" (type_name v))
 
 let expect_string v =
   match v with
   | VString s -> s
   | _ ->
       failwith
-        (Printf.sprintf "Type error: expected string, got %s" (type_name v))
+        (Format.asprintf "Type error: expected string, got %s" (type_name v))
 
 (* Run-time value of a left-hand-side *)
 type lvalue =
@@ -529,7 +535,7 @@ let load (var : string) (env : record_env) : value =
   with Not_found -> (
     try Env.find env.node_env var
     with Not_found ->
-      Printf.printf "load fail: %s\n" var;
+      Log.err (fun m -> m "load fail: %s" var);
       failwith "Variable not found")
 
 (* Helper to wake up records waiting on a future *)
@@ -556,12 +562,12 @@ let rec eval (env : record_env) (expr : expr) : value =
               match eval env k with
               | VInt i | VNode i ->
                   if i < 0 || i >= List.length !l then (
-                    Printf.printf "idx %d, len %d\n" i (List.length !l);
+                    Log.err (fun m -> m "idx %d, len %d" i (List.length !l));
                     failwith "idx out of range of VList")
                   else List.nth !l i
               | other ->
                   failwith
-                    (Printf.sprintf "Cannot index into a list with %s"
+                    (Format.asprintf "Cannot index into a list with %s"
                        (type_name other))))
       | VString s -> (
           match load s env with
@@ -571,15 +577,17 @@ let rec eval (env : record_env) (expr : expr) : value =
                 "EFind eval fail: cannot index into anything else but map with \
                  string")
       | other ->
-          Printf.printf "Collection %s is %s, cannot index into using %s\n"
-            (to_string_expr c) (type_name other) (to_string_expr k);
+          Log.err (fun m ->
+              m "Collection %s is %s, cannot index into using %s"
+                (to_string_expr c) (type_name other) (to_string_expr k));
           failwith
-            (Printf.sprintf "EFind eval fail: cannot index into %s"
+            (Format.asprintf "EFind eval fail: cannot index into %s"
                (type_name other)))
   | ENot e -> (
       match eval env e with
       | VBool b -> VBool (not b)
-      | other -> failwith (Printf.sprintf "Cannot negate %s" (type_name other)))
+      | other -> failwith (Format.asprintf "Cannot negate %s" (type_name other))
+      )
   | EAnd (e1, e2) ->
       VBool (expect_bool (eval env e1) && expect_bool (eval env e2))
   | EOr (e1, e2) ->
@@ -689,7 +697,7 @@ let rec eval (env : record_env) (expr : expr) : value =
       | VMap m -> VInt (ValueMap.length m)
       | other ->
           failwith
-            (Printf.sprintf "EListLen eval fail on %s (not a collection)"
+            (Format.asprintf "EListLen eval fail on %s (not a collection)"
                (type_name other)))
   | EListAccess (ls, idx) -> (
       let l = expect_list (eval env ls) in
@@ -851,7 +859,7 @@ let eval_lhs (env : record_env) (lhs : lhs) : lvalue =
       | VList l -> LVAccessList (eval env exp, l)
       | other ->
           failwith
-            (Printf.sprintf "LAccess can't index into %s" (type_name other)))
+            (Format.asprintf "LAccess can't index into %s" (type_name other)))
   | LTuple strs -> LVTuple strs
 
 let store (lhs : lhs) (vl : value) (env : record_env) : unit =
@@ -870,9 +878,9 @@ let store (lhs : lhs) (vl : value) (env : record_env) : unit =
             let lst = !ref_l in
             ref_l := List.mapi (fun j x -> if j = i then vl else x) lst
       | other ->
-          Printf.printf "failed to index into %s\n" (to_string_lhs lhs);
+          Log.err (fun m -> m "failed to index into %s" (to_string_lhs lhs));
           failwith
-            (Printf.sprintf "Can't index into a list with %s" (type_name other))
+            (Format.asprintf "Can't index into a list with %s" (type_name other))
       )
   | LVTuple _ -> failwith "how to store LVTuples?"
 
@@ -891,14 +899,14 @@ let copy (lhs : lhs) (vl : value) (env : record_env) : unit =
           Env.replace env.local_env var (VList temp)
       | other ->
           failwith
-            (Printf.sprintf "Cannot copy %s (only collections can be copied)"
+            (Format.asprintf "Cannot copy %s (only collections can be copied)"
                (type_name other)))
   | _ -> failwith "copying only to local_copy"
 
 let function_info name program =
   try Env.find program.rpc name
   with Not_found ->
-    Printf.printf "function %s is not defined in program.functions\n" name;
+    Log.err (fun m -> m "function %s is not defined in program.functions" name);
     failwith "Function not found"
 
 let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
@@ -968,7 +976,7 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
                      ^ to_string_lhs lhs)
               | other ->
                   failwith
-                    (Printf.sprintf
+                    (Format.asprintf
                        "Type error: Attempted to resolve \n%s (not a promise)"
                        (type_name other))))
       | Cond (cond, bthen, belse) -> (
@@ -977,12 +985,12 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
           | VBool false -> current_pc := belse
           | other ->
               failwith
-                (Printf.sprintf
+                (Format.asprintf
                    "Type error in sync cond: expected \nbool, got %s"
                    (type_name other)))
       | Return expr -> raise (SyncReturn (eval env expr))
       | Print (expr, next) ->
-          Printf.printf "%s\n" (to_string_value (eval env expr));
+          Log.app (fun m -> m "%s" (to_string_value (eval env expr)));
           current_pc := next
       | Break target_vertex -> current_pc := target_vertex
       | ForLoopIn (lhs, expr, body, next) -> (
@@ -1011,8 +1019,9 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
                     Env.add env.local_env value v;
                     current_pc := body
                 | _ ->
-                    Printf.printf "failed to iterate map with lhs: %s\n"
-                      (to_string_lhs lhs);
+                    Log.err (fun m ->
+                        m "failed to iterate map with lhs: %s"
+                          (to_string_lhs lhs));
                     failwith
                       "Cannot iterate through map with anything other than a \
                        2-tuple")
@@ -1038,16 +1047,17 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
                     Env.add env.local_env var (Option.get removed_item);
                     current_pc := body
                 | _ ->
-                    Printf.printf "failed to iterate list with lhs %s\n"
-                      (to_string_lhs lhs);
+                    Log.err (fun m ->
+                        m "failed to iterate list with lhs %s"
+                          (to_string_lhs lhs));
                     failwith
                       "Cannot iterate through list with anything other than a \
                        single variable")
           | other ->
-              Printf.printf "failed to iterate collection: %s\n"
-                (to_string_expr expr);
+              Log.err (fun m ->
+                  m "failed to iterate collection: %s" (to_string_expr expr));
               failwith
-                (Printf.sprintf "ForLoopIn on %s (not a collection)"
+                (Format.asprintf "ForLoopIn on %s (not a collection)"
                    (type_name other)))
       | Lock (_, _) | Unlock (_, _) ->
           failwith
@@ -1082,13 +1092,15 @@ let exec (state : state) (program : program) (record : record) =
                        Env.add new_env formal (eval env actual))
                      formals actuals
                  with Invalid_argument _ ->
-                   Printf.printf
-                     "Func %s mismatches def and caller args\n\
-                     \                    formals: %s\n\n\
-                     \                               actuals: %s\n"
-                     func
-                     (String.concat ", " formals)
-                     (String.concat ", \n" (List.map to_string_expr actuals));
+                   Log.err (fun m ->
+                       m
+                         "Func %s mismatches def and caller args\n\
+                         \                    formals: %s\n\n\
+                         \                               actuals: %s"
+                         func
+                         (String.concat ", " formals)
+                         (String.concat ", \n"
+                            (List.map to_string_expr actuals)));
                    failwith "Mismatched arguments in function call");
                 List.iter
                   (fun (var_name, expr) ->
@@ -1112,15 +1124,17 @@ let exec (state : state) (program : program) (record : record) =
                 store lhs (VFuture new_future) env;
                 if BatSet.Int.mem node_id state.crash_info.currently_crashed
                 then (
-                  Printf.printf
-                    "Queueing new message from %d to crashed node %d (from exec)\n"
-                    record.node node_id;
+                  Log.debug (fun m ->
+                      m
+                        "Queueing new message from %d to crashed node %d (from \
+                         exec)"
+                        record.node node_id);
                   state.crash_info.queued_messages <-
                     (node_id, new_record) :: state.crash_info.queued_messages)
                 else DA.add state.runnable_records new_record
             | other ->
                 failwith
-                  (Printf.sprintf "Type error: expected node for RPC, got %s"
+                  (Format.asprintf "Type error: expected node for RPC, got %s"
                      (type_name other)))
         | SyncCall (lhs, func_name, actual_exprs) ->
             (* Evaluate args in the async env *)
@@ -1187,7 +1201,7 @@ let exec (state : state) (program : program) (record : record) =
                    ^ to_string_lhs lhs)
             | other ->
                 failwith
-                  (Printf.sprintf
+                  (Format.asprintf
                      "Type error: Attempted to resolve %s (not a promise)"
                      (type_name other))));
         loop ()
@@ -1197,7 +1211,7 @@ let exec (state : state) (program : program) (record : record) =
         | VBool false -> record.pc <- belse
         | other ->
             failwith
-              (Printf.sprintf "Type error in condition: expected bool, got %s"
+              (Format.asprintf "Type error in condition: expected bool, got %s"
                  (type_name other)));
         loop ()
     | Await (lhs, expr, next) -> (
@@ -1218,9 +1232,11 @@ let exec (state : state) (program : program) (record : record) =
                       state.crash_info.currently_crashed
                   then (
                     (* Node is crashed: Queue for recovery *)
-                    Printf.printf
-                      "Queueing (from waiter) task from %d for crashed node %d\n"
-                      record.origin_node record.node;
+                    Log.debug (fun m ->
+                        m
+                          "Queueing (from waiter) task from %d for crashed \
+                           node %d"
+                          record.origin_node record.node);
                     state.crash_info.queued_messages <-
                       (record.node, record) :: state.crash_info.queued_messages)
                   else
@@ -1231,7 +1247,7 @@ let exec (state : state) (program : program) (record : record) =
                 state.waiting_records <- record :: state.waiting_records)
         | other ->
             failwith
-              (Printf.sprintf "Type error in await: expected future, got %s"
+              (Format.asprintf "Type error in await: expected future, got %s"
                  (type_name other)))
     | SpinAwait (expr, next) -> (
         match eval env expr with
@@ -1244,7 +1260,7 @@ let exec (state : state) (program : program) (record : record) =
               DA.add state.runnable_records record
         | other ->
             failwith
-              (Printf.sprintf "Type error in SpinAwait: expected bool, got %s"
+              (Format.asprintf "Type error in SpinAwait: expected bool, got %s"
                  (type_name other)))
     | Return expr -> record.continuation (eval env expr)
     | Pause next ->
@@ -1282,8 +1298,8 @@ let exec (state : state) (program : program) (record : record) =
                   record.pc <- body;
                   loop ()
               | _ ->
-                  Printf.printf "failed to iterate map with lhs: %s\n"
-                    (to_string_lhs lhs);
+                  Log.err (fun m ->
+                      m "failed to iterate map with lhs: %s" (to_string_lhs lhs));
                   failwith
                     "Cannot iterate through map with anything other than a \
                      2-tuple")
@@ -1315,19 +1331,19 @@ let exec (state : state) (program : program) (record : record) =
                   record.pc <- body;
                   loop ()
               | _ ->
-                  Printf.printf "failed to iterate list with lhs %s\n"
-                    (to_string_lhs lhs);
+                  Log.err (fun m ->
+                      m "failed to iterate list with lhs %s" (to_string_lhs lhs));
                   failwith
                     "Cannot iterate through list with anything other than a \
                      single variable")
         | other ->
-            Printf.printf "failed to iterate collection: %s\n"
-              (to_string_expr expr);
+            Log.err (fun m ->
+                m "failed to iterate collection: %s" (to_string_expr expr));
             failwith
-              (Printf.sprintf "ForLoopIn on %s (not a collection)"
+              (Format.asprintf "ForLoopIn on %s (not a collection)"
                  (type_name other)))
     | Print (expr, next) ->
-        Printf.printf "%s\n" (to_string_value (eval env expr));
+        Log.app (fun m -> m "%s" (to_string_value (eval env expr)));
         record.pc <- next;
         loop ()
     | Break target_vertex ->
@@ -1361,9 +1377,9 @@ let schedule_record (state : state) (program : program)
     (sever_all_but_mid : bool) (partition_away_nodes : int list)
     (randomly_delay_msgs : bool) : unit =
   if false then
-    Printf.printf "%b %b %b %b\n" randomly_drop_msgs cut_tail_from_mid
-      sever_all_but_mid
-      (List.length partition_away_nodes = 0);
+    Log.debug (fun m ->
+        m "%b %b %b %b" randomly_drop_msgs cut_tail_from_mid sever_all_but_mid
+          (List.length partition_away_nodes = 0));
 
   let len = DA.length state.runnable_records in
   if len = 0 then raise Halt;
@@ -1384,7 +1400,7 @@ let schedule_record (state : state) (program : program)
   if BatSet.Int.mem r.node state.crash_info.currently_crashed then
     (* This should never happen *)
     let _ =
-      Printf.printf "Failure: source %d for dst %d \n" r.origin_node r.node
+      Log.err (fun m -> m "Failure: source %d for dst %d " r.origin_node r.node)
     in
     () (* Record is already removed, just drop it *)
   else
@@ -1399,9 +1415,9 @@ let schedule_record (state : state) (program : program)
 
             (* If destination is crashed, queue the message *)
             if BatSet.Int.mem dest_node state.crash_info.currently_crashed then (
-              Printf.printf
-                "  Queueing message from %d to crashed node %d (step %d)\n"
-                src_node dest_node state.crash_info.current_step;
+              Log.debug (fun m ->
+                  m "  Queueing message from %d to crashed node %d (step %d)"
+                    src_node dest_node state.crash_info.current_step);
               state.crash_info.queued_messages <-
                 (dest_node, r) :: state.crash_info.queued_messages)
             else

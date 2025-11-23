@@ -14,7 +14,9 @@
   ppx_deriving.show
   ppx_deriving.ord
   ppx_deriving.eq
-  sqlite3)
+  sqlite3
+  logs
+  fmt)
  (modules ast parser lexer simulator loader history)
  (preprocess
   (pps ppx_deriving.ord ppx_deriving.eq ppx_deriving.show)))

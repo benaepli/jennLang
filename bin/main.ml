@@ -7,7 +7,15 @@ open Execution
 open PlanGenerator
 open Sqlite3
 
+let setup_log ?(style_renderer = `Ansi_tty) level =
+  Fmt_tty.setup_std_outputs ~style_renderer ();
+  Logs.set_level level;
+  Logs.set_reporter (Logs_fmt.reporter ())
+
 let num_sys_threads (num_servers : int) = num_servers * 3
+let src = Logs.Src.create "main" ~doc:"Main logs"
+
+module Log = (val Logs.src_log src : Logs.LOG)
 
 (** Create a fresh global state for each benchmark run *)
 let create_fresh_global_state (num_servers : int) (num_clients : int) : state =
@@ -39,15 +47,15 @@ let print_single_node (node : value Env.t) =
   Env.iter
     (fun key value ->
       if not (BatString.starts_with key "_tmp") then
-        Printf.printf "%s: %s\n" key (to_string_value value))
+        Log.info (fun m -> m "%s: %s" key (to_string_value value)))
     node
 
 let print_global_nodes (nodes : value Env.t array) =
   Array.iter
     (fun node ->
-      print_endline "Node has:";
+      Log.info (fun m -> m "Node has:");
       print_single_node node;
-      print_endline "")
+      Log.info (fun m -> m ""))
     nodes
 
 let init_topology (topology : topology_info) (global_state : state)
@@ -119,7 +127,7 @@ let init_clients (global_state : state) (prog : program) (num_servers : int)
 let init_nodes (global_state : state) (prog : program) (num_servers : int) :
     unit =
   let init_fn_name = "Node.BASE_NODE_INIT" in
-  Printf.printf "Found Node init function: %s\n" init_fn_name;
+  Log.info (fun m -> m "Found Node init function: %s" init_fn_name);
   let init_fn = Env.find prog.rpc init_fn_name in
 
   for i = 0 to num_servers - 1 do
@@ -200,10 +208,11 @@ let () =
   let explorer_config_json = Sys.argv.(2) in
   let output_dir = Sys.argv.(3) in
 
-  Printf.printf "🚀 Starting Execution Explorer...\n";
-  Printf.printf "Program: %s\n" compiled_json;
-  Printf.printf "Config: %s\n" explorer_config_json;
-  Printf.printf "Output directory: %s\n" output_dir;
+  setup_log (Some Logs.Warning);
+  Log.app (fun m -> m "🚀 Starting Execution Explorer...");
+  Log.app (fun m -> m "Program: %s" compiled_json);
+  Log.app (fun m -> m "Config: %s" explorer_config_json);
+  Log.app (fun m -> m "Output directory: %s" output_dir);
 
   (* Read the main explorer config *)
   let config = read_config_file explorer_config_json in
@@ -223,10 +232,10 @@ let () =
     * List.length all_reads * List.length all_timeouts * List.length all_crashes
     * List.length all_densities
   in
-  Printf.printf "Total unique configurations to test: %d\n" total_configs;
-  Printf.printf "Runs per configuration: %d\n" config.num_runs_per_config;
-  Printf.printf "Total simulations: %d\n\n"
-    (total_configs * config.num_runs_per_config);
+  Log.info (fun m -> m "Total unique configurations to test: %d" total_configs);
+  Log.info (fun m -> m "Runs per configuration: %d" config.num_runs_per_config);
+  Log.info (fun m ->
+      m "Total simulations: %d\n" (total_configs * config.num_runs_per_config));
 
   let config_counter = ref 0 in
   let run_counter = ref 0 in
@@ -257,10 +266,11 @@ let () =
                                   num_servers num_clients num_writes num_reads
                                   num_timeouts num_crashes density
                               in
-                              Printf.printf "%s\n" (String.make 70 '=');
-                              Printf.printf "Running Config %d / %d: %s\n"
-                                !config_counter total_configs config_name;
-                              Printf.printf "%s\n" (String.make 70 '=');
+                              Log.app (fun m -> m "%s" (String.make 70 '='));
+                              Log.app (fun m ->
+                                  m "Running Config %d / %d: %s" !config_counter
+                                    total_configs config_name);
+                              Log.app (fun m -> m "%s" (String.make 70 '='));
 
                               (* This is the specific config for this single run *)
                               let run_config : single_run_config =
@@ -282,8 +292,9 @@ let () =
 
                               for i = 1 to config.num_runs_per_config do
                                 incr run_counter;
-                                Printf.printf " Run %d/%d (overall #%d) %!" i
-                                  config.num_runs_per_config !run_counter;
+                                Log.app (fun m ->
+                                    m " Run %d/%d (overall #%d) %!" i
+                                      config.num_runs_per_config !run_counter);
 
                                 let start_time = Unix.gettimeofday () in
                                 try
@@ -292,14 +303,17 @@ let () =
                                     run_config config.max_iterations;
 
                                   let end_time = Unix.gettimeofday () in
-                                  Printf.printf " Success (%.4fs)\n"
-                                    (end_time -. start_time)
+                                  Log.app (fun m ->
+                                      m " Success (%.4fs)"
+                                        (end_time -. start_time))
                                 with
                                 | Failure msg ->
-                                    Printf.printf " FAILED (Error: %s)\n" msg
+                                    Log.err (fun m ->
+                                        m " Failed (Error: %s)" msg)
                                 | e ->
-                                    Printf.printf " FAILED (Exception: %s)\n"
-                                      (Printexc.to_string e)
+                                    Log.err (fun m ->
+                                        m " Failed (Exception: %s)"
+                                          (Printexc.to_string e))
                               done)
                             all_densities)
                         all_crashes)
@@ -310,4 +324,4 @@ let () =
     all_servers;
 
   ignore (db_close db);
-  print_endline "\nExecution explorer finished."
+  Log.app (fun m -> m "\nExecution explorer finished.")
