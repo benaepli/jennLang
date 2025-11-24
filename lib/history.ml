@@ -84,12 +84,12 @@ let init_sqlite (db : db) : unit =
   in
   let create_executions =
     "CREATE TABLE IF NOT EXISTS executions ( run_id INTEGER REFERENCES \
-     runs(run_id), unique_id INTEGER, client_id INTEGER, kind TEXT, action \
-     TEXT, payload JSON );"
+     runs(run_id), seq_num INTEGER, unique_id INTEGER, client_id INTEGER, kind \
+     TEXT, action TEXT, payload JSON, PRIMARY KEY (run_id, seq_num) );"
   in
   let create_index =
     "CREATE INDEX IF NOT EXISTS idx_run_execution ON executions(run_id, \
-     unique_id);"
+     seq_num);"
   in
   ignore (exec db create_runs);
   ignore (exec db create_executions);
@@ -107,29 +107,35 @@ let save_history (db : db) (run_id : int) (history : operation DA.t) : unit =
   ignore (exec db "BEGIN TRANSACTION;");
   let stmt =
     prepare db
-      "INSERT INTO executions (run_id, unique_id, client_id, kind, action, \
-       payload) VALUES (?, ?, ?, ?, ?, ?)"
+      "INSERT INTO executions (run_id, seq_num, unique_id, client_id, kind, \
+       action, payload) VALUES (?, ?, ?, ?, ?, ?, ?)"
   in
+
+  let seq_counter = ref 0 in
 
   DA.iter
     (fun op ->
+      let current_seq = !seq_counter in
+      incr seq_counter;
+
       ignore (reset stmt);
       ignore (bind stmt 1 (Sqlite3.Data.INT (Int64.of_int run_id)));
-      ignore (bind stmt 2 (Sqlite3.Data.INT (Int64.of_int op.unique_id)));
-      ignore (bind stmt 3 (Sqlite3.Data.INT (Int64.of_int op.client_id)));
+      ignore (bind stmt 2 (Sqlite3.Data.INT (Int64.of_int current_seq)));
+      ignore (bind stmt 3 (Sqlite3.Data.INT (Int64.of_int op.unique_id)));
+      ignore (bind stmt 4 (Sqlite3.Data.INT (Int64.of_int op.client_id)));
 
       let kind =
         match op.kind with Response -> "Response" | Invocation -> "Invocation"
       in
-      ignore (bind stmt 4 (Sqlite3.Data.TEXT kind));
+      ignore (bind stmt 5 (Sqlite3.Data.TEXT kind));
 
-      ignore (bind stmt 5 (Sqlite3.Data.TEXT op.op_action));
+      ignore (bind stmt 6 (Sqlite3.Data.TEXT op.op_action));
 
       let payload_json_array =
         List.map json_of_value op.payload |> fun json_list ->
         `List json_list |> Yojson.Basic.to_string
       in
-      ignore (bind stmt 6 (Sqlite3.Data.TEXT payload_json_array));
+      ignore (bind stmt 7 (Sqlite3.Data.TEXT payload_json_array));
 
       ignore (step stmt))
     history;
