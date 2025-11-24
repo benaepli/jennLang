@@ -94,7 +94,7 @@ let reinit_single_node (topology : topology_info) (state : state)
   Env.add env "self" (VNode node_id);
 
   let record_env = { local_env = env; node_env = state.nodes.(node_id) } in
-  let _ = exec_sync prog record_env init_fn.entry in
+  let _ = exec_sync state prog record_env init_fn.entry in
   recover_node_in_topology topology state prog node_id continuation
 
 let in_progress_client_ops : (int, event_id) Hashtbl.t = Hashtbl.create 10

@@ -909,8 +909,8 @@ let function_info name program =
     Log.err (fun m -> m "function %s is not defined in program.functions" name);
     failwith "Function not found"
 
-let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
-    : value =
+let rec exec_sync (state : state) (program : program) (env : record_env)
+    (start_pc : CFG.vertex) : value =
   let current_pc = ref start_pc in
   try
     while true do
@@ -948,11 +948,58 @@ let rec exec_sync (program : program) (env : record_env) (start_pc : CFG.vertex)
                 { local_env = callee_env; node_env = env.node_env }
               in
               Env.add callee_record_env.local_env "self" (load "self" env);
-              (* Pass 'self' *)
-              let result = exec_sync program callee_record_env entry in
+              let result = exec_sync state program callee_record_env entry in
               store lhs result env
-          | Async (_, _, _, _) ->
-              failwith "Runtime Error: 'sync' function cannot execute 'Async'"
+          | Async (lhs, node, func, actuals) -> (
+              match eval env node with
+              | VNode node_id | VInt node_id ->
+                  let new_future = { value = None; waiters = [] } in
+                  let { entry; formals; locals; _ } =
+                    function_info func program
+                  in
+                  let new_env = Env.create 1024 in
+                  (try
+                     List.iter2
+                       (fun formal actual ->
+                         Env.add new_env formal (eval env actual))
+                       formals actuals
+                   with Invalid_argument _ ->
+                     failwith "Mismatched arguments in function call");
+                  List.iter
+                    (fun (var_name, expr) ->
+                      Env.add new_env var_name (eval env expr))
+                    locals;
+
+                  (* We need to find the current node ID. 
+                   In exec_sync, 'self' is loaded in the env. *)
+                  let origin_node = expect_node (load "self" env) in
+
+                  let new_record =
+                    {
+                      node = node_id;
+                      origin_node;
+                      pc = entry;
+                      continuation =
+                        (fun value ->
+                          new_future.value <- Some value;
+                          wake_waiters new_future);
+                      env = new_env;
+                      id = -1;
+                      x = 0.5;
+                      f = (fun x -> x);
+                    }
+                  in
+                  store lhs (VFuture new_future) env;
+
+                  if BatSet.Int.mem node_id state.crash_info.currently_crashed
+                  then
+                    state.crash_info.queued_messages <-
+                      (node_id, new_record) :: state.crash_info.queued_messages
+                  else DA.add state.runnable_records new_record
+              | other ->
+                  failwith
+                    (Format.asprintf "Type error: expected node for RPC, got %s"
+                       (type_name other)))
           | Resolve (lhs, rhs) -> (
               let value_to_resolve = eval env rhs in
               let promise_val =
@@ -1173,8 +1220,9 @@ let exec (state : state) (program : program) (record : record) =
             Env.add callee_record_env.local_env "self" (VNode record.node);
 
             (* Run the sync call to completion *)
-            let return_value = exec_sync program callee_record_env entry in
-
+            let return_value =
+              exec_sync state program callee_record_env entry
+            in
             store lhs return_value env;
             loop ()
         | Assign (lhs, rhs) -> store lhs (eval env rhs) env

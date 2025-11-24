@@ -6,17 +6,6 @@ type Payload {
 
 type DependencySet = map<int, bool>;
 
-type Command {
-    payload: Payload;
-    phase: int; // 0: Initial, 1: PreAccepted, 2: Accepted, 3: Committted
-    dependencies: DependencySet;
-    ballot: int;
-    accepted_ballot: int;
-    initial_payload: Payload;
-    initial_dependencies: DependencySet;
-    leader: Node;
-};
-
 type PreAcceptRequest {
     sender: Node;
     id: int;
@@ -29,6 +18,36 @@ type PreAcceptOKRequest {
     dependencies: DependencySet;
 };
 
+type AcceptRequest {
+    sender: Node;
+    ballot: int;
+    id: int;
+    payload: Payload;
+    dependencies: DependencySet;
+};
+
+type AcceptOKRequest {
+    ballot: int;
+    id: int;
+};
+
+type CommitRequest = AcceptRequest;
+
+type Command {
+    payload: Payload;
+    phase: int; // 0: Initial, 1: PreAccepted, 2: Accepted, 3: Committted
+    dependencies: DependencySet;
+    ballot: int;
+    acceptedBallot: int;
+    initialPayload: Payload;
+    initialDependencies: DependencySet;
+    leader: Node;
+
+    preAcceptResponses: list<PreAcceptOKRequest>;
+    preAcceptQuorumMet: bool;
+    acceptResponses: list<AcceptOKRequest>;
+};
+
 
 role Node {
     // The index of our own node in the replicas list.
@@ -38,9 +57,35 @@ role Node {
     // ID -> Command info.
     var commands: map<int, Command> = {};
 
+    var f: int = 0;
+    var e: int = 0;
+
+    var executed: map<int, bool> = {};
+
+    // State for Tarjan's SCC
+    var t_index: int = 0;
+    var t_stack: list<int> = [];
+    var t_onStack: map<int, bool> = {};
+    var t_ids: map<int, int> = {};
+    var t_low: map<int, int> = {};
+    var t_sccs: list<list<int>> = [];
+
+
     func Init(me: int, all: list<Node>) {
         self = me;
         replicas = all;
+
+        var n: int = len(replicas);
+        f = (n - 1) / 2;
+        e = (n - f + 1) / 2;
+    }
+
+    sync func fastQuorum() -> int {
+        return len(replicas) - e;
+    }
+
+    sync func slowQuorum() -> int {
+        return len(replicas) - f;
     }
 
     sync func localConflicts(c: Payload) -> DependencySet {
@@ -65,6 +110,14 @@ role Node {
         return result;
     }
 
+    // Helper to check if a command is locally committed
+    sync func isCommitted(id: int) -> bool {
+        if (!exists(commands, id)) {
+            return false;
+        }
+        return commands[id].phase == 3;
+    }
+
 
     // Submit handles starting a new request. Figure 3 of EPaxos*.
     func Submit(c: Payload, id: int) {
@@ -76,6 +129,8 @@ role Node {
             dependencies: localDeps,
         };
 
+        // We need to handle our own node first because of the potential the PreAcceptOK 
+        // precondition check fails due to a race condition.
         await PreAccept(request);
         for (node in replicas) {
             if (node != replicas[self]) {
@@ -103,10 +158,14 @@ role Node {
             phase: 1, // PreAccepted
             dependencies: allConflicts,
             ballot: 0,
-            accepted_ballot: 0,
-            initial_payload: request.payload,
-            initial_dependencies: allConflicts,
+            acceptedBallot: 0,
+            initialPayload: request.payload,
+            initialDependencies: request.dependencies,
             leader: request.sender,
+
+            preAcceptResponses: [],
+            preAcceptQuorumMet: false,
+            acceptResponses: [],
         };
         commands[request.id] = cmd;
 
@@ -118,12 +177,345 @@ role Node {
         ));
     }
 
-    func preAcceptOKWithQuorum(id: int) {
+    // preAcceptOKWithQuorum handles when we have a quorum after preAccept. See figure 3 of EPaxos*. 
+    sync func preAcceptOKWithQuorum(id: int) {
+        // Preconditions.
+        if (!exists(commands, id)) {
+            return ();
+        }
+        var command: Command = commands[id];
+        if (command.ballot != 0 or command.phase != 1) {
+            return ();
+        }
+        
+        var allDependencies: DependencySet = {};
+        for (resp in command.preAcceptResponses) {
+            allDependencies = union(allDependencies, resp.dependencies);
+        }
 
+        var hasFastCount: bool = len(command.preAcceptResponses) >= fastQuorum();
+    
+        var depsMatch: bool = true;
+        for (resp in command.preAcceptResponses) {
+            // Checking length should be sufficient by set operations, since PreAccept 
+            // unions together our initial dependencies with theirs.
+            if (len(resp.dependencies) != len(command.initialDependencies)) {
+                depsMatch = false;
+            }
+        }
+
+        var isFastPath: bool = hasFastCount and depsMatch;
+
+        // A commit request is aliased for an accept request.
+        var request: AcceptRequest = CommitRequest{
+            sender: replicas[self],
+            ballot: 0,
+            id: id,
+            payload: command.payload,
+            dependencies: allDependencies,
+        };
+        if (isFastPath) {
+            for (node in replicas) {
+                rpc_call(node, Commit(request));
+            }
+        } else {
+            for (node in replicas) {
+                rpc_call(node, Accept(request));
+            }
+        }
     }
 
+    // PreAcceptOK handles all PreAcceptOK requests and decides whether we have a quorum.
     func PreAcceptOK(request: PreAcceptOKRequest) {
+        // Precondition: we haven't already moved past this phase.
+        if (!exists(commands, request.id)) {
+            return ();
+        }
+        var cmd: Command = commands[request.id];
+        if (cmd.phase != 1) {
+            return ();
+        } 
+
+        append(cmd.preAcceptResponses, request);
         
+        // TODO(benaepli): handle the optimistic wait for the slow path.
+        if (!cmd.preAcceptQuorumMet and len(cmd.preAcceptResponses) >= fastQuorum()) {
+            cmd.preAcceptQuorumMet = true;
+            preAcceptOKWithQuorum(request.id);
+        }
+    }
+
+    // Accept handles all Accept requests in the slow path (Figure 3).
+    func Accept(request: AcceptRequest) {
+        if (!exists(commands, request.id)) {
+            return ();
+        }
+        var command: Command = commands[request.id];
+        if (command.ballot > request.ballot) {
+            return ();
+        }
+        if (command.ballot == request.ballot and command.phase == 3) {
+            return ();
+        }
+
+        commands[request.id] = Command{
+            payload: request.payload,
+            phase: 2,
+            dependencies: request.dependencies,
+            ballot: request.ballot,
+            acceptedBallot: request.ballot,
+            initialPayload: command.initialPayload,
+            initialDependencies: command.initialDependencies,
+            leader: command.leader,
+            preAcceptResponses: [],
+            preAcceptQuorumMet: false,
+            acceptResponses: [],
+        };
+        rpc_call(request.sender, AcceptOK(
+            AcceptOKRequest{
+                ballot: request.ballot,
+                id: request.id,
+            }
+        ));
+    }
+
+    // AcceptOK handles all Accept responses in the slow path (Figure 3).
+    func AcceptOK(request: AcceptOKRequest) {
+        if (!exists(commands, request.id)) {
+            return ();
+        }
+        var command: Command = commands[request.id];
+        if (command.ballot != request.ballot or command.phase != 2) {
+            return ();
+        }
+
+        if (len(command.acceptResponses) >= slowQuorum()) {
+            var req: CommitRequest = CommitRequest{
+                sender: replicas[self],
+                ballot: request.ballot,
+                id: request.id,
+                payload: command.payload,
+                dependencies: command.dependencies,
+            };
+            for (node in replicas) {
+                rpc_call(node, Commit(req));
+            }
+        }
+    }
+
+    // Commit handles commit requests as in Figure 3.
+    func Commit(request: CommitRequest) {
+        if (!exists(commands, request.id)) {
+            return ();
+        }
+        var command: Command = commands[request.id];
+        if (command.ballot != request.ballot) {
+            return ();
+        }
+        commands[request.id] = Command{
+            payload: request.payload,
+            phase: 3,
+            dependencies: request.dependencies,
+            ballot: request.ballot,
+            acceptedBallot: request.ballot,
+            initialPayload: command.initialPayload,
+            initialDependencies: command.initialDependencies,
+            leader: command.leader,
+            preAcceptResponses: [], 
+            preAcceptQuorumMet: false,
+            acceptResponses: [],
+        };
+
+        TryExecute();
+    }
+
+    // Step 1 (Figure 1, Line 2): 
+    // Compute the largest subgraph G where nodes are committed and dependencies exist in G.
+    // We use memoized DFS to determine validity.
+    sync func buildExecutionGraph() -> list<int> {
+        var valid: map<int, bool> = {};
+        var visiting: map<int, bool> = {};
+        var graphNodes: list<int> = [];
+
+        // We iterate all known commands. In a real optimization, we might optimize 
+        // to only start from unexecuted commands, but for strict graph correctness
+        // we check the whole committed history or maintain a frontier.
+        for ((id, cmd) in commands) {
+            if (cmd.phase == 3) {
+                if (checkValidity(id, valid, visiting)) {
+                    append(graphNodes, id);
+                }
+            }
+        }
+        return graphNodes;
+    }
+
+    // Recursive validity check for graph inclusion
+    sync func checkValidity(id: int, valid: map<int, bool>, visiting: map<int, bool>) -> bool {
+        if (exists(valid, id)) {
+            return valid[id];
+        }
+        
+        if (!isCommitted(id)) {
+            valid[id] = false;
+            return false;
+        }
+
+        visiting[id] = true;
+        var deps: DependencySet = commands[id].dependencies;
+        
+        for ((depId, _) in deps) {
+            // If we encounter a node currently being visited, it's a cycle (SCC).
+            // Cycles are valid in G, so we ignore this edge for validity checking.
+            if (exists(visiting, depId) and visiting[depId]) {
+                // continue;
+            } else {
+                // If a dependency is invalid, this node is invalid.
+                if (!checkValidity(depId, valid, visiting)) {
+                    visiting[id] = false;
+                    valid[id] = false;
+                    return false;
+                }
+            }
+        }
+
+        visiting[id] = false;
+        valid[id] = true;
+        return true;
+    }
+
+    sync func getSCCs(graphNodes: list<int>) -> list<list<int>> {
+        // Reset State
+        t_index = 0;
+        t_stack = [];
+        t_onStack = {};
+        t_ids = {};
+        t_low = {};
+        t_sccs = [];
+
+        for (id in graphNodes) {
+            if (!exists(t_ids, id)) {
+                tarjanDFS(id);
+            }
+        }
+
+        // Tarjan's returns SCCs in reverse topological order (leaves first).
+        // We must reverse the list of SCCs.
+        var result: list<list<int>> = [];
+        var i: int = len(t_sccs) - 1;
+        for (;i >= 0;) {
+            append(result, t_sccs[i]);
+            i = i - 1;
+        }
+        return result;
+    }
+
+    sync func tarjanDFS(at: int) {
+        t_stack = append(t_stack, at); // Push
+        t_onStack[at] = true;
+        t_ids[at] = t_index;
+        t_low[at] = t_index;
+        t_index = t_index + 1;
+
+        var cmd: Command = commands[at];
+        // Iterate dependencies that are actually in our valid graph G
+        for ((to, _) in cmd.dependencies) {
+            // We must verify the dependency is actually part of the valid graph
+            // (It might be uncommitted, though checkValidity prevents that, 
+            // or it might be committed but excluded from G due to its own deps).
+            // However, strictly, if 'at' is in G, 'to' must be in G.
+            
+            // Just check if we have visited 'to' in this Tarjan run yet.
+            // If 'to' isn't in t_ids, it might not be visited, or it might not be in G.
+            // We check existence in commands first to be safe, but we rely on G construction.
+            
+            if (exists(commands, to) and isCommitted(to)) {
+                // Check if 'to' was part of the initial graphNodes set? 
+                // For simplicity, we assume checkValidity ensured closure.
+                
+                if (!exists(t_ids, to)) {
+                    tarjanDFS(to);
+                    t_low[at] = min(t_low[at], t_low[to]);
+                } else {
+                    if (exists(t_onStack, to) and t_onStack[to]) {
+                        t_low[at] = min(t_low[at], t_ids[to]);
+                    }
+                }
+            }
+        }
+
+        // If at is a root node, pop the stack and generate an SCC
+        if (t_ids[at] == t_low[at]) {
+            var newSCC: list<int> = [];
+            var node: int = -1;
+            for (;node != at;) {
+                // Pop
+                var idx: int = len(t_stack) - 1;
+                node = t_stack[idx];
+                // Remove last
+                var newStack: list<int> = [];
+                var k: int = 0;
+                for (;k < idx;) {
+                    append(newStack, t_stack[k]);
+                    k = k + 1;
+                }
+                t_stack = newStack;
+                
+                t_onStack[node] = false;
+                append(newSCC, node);
+            }
+            append(t_sccs, newSCC);
+        }
+    }
+
+    // Simple sort for IDs within an SCC (Bubble sort for simplicity in Spur)
+    sync func sortIDs(ids: list<int>) -> list<int> {
+        var n: int = len(ids);
+        var i: int = 0;
+        for (;i < n - 1;) {
+            var j: int = 0;
+            for (;j < n - i - 1;) {
+                if (ids[j] > ids[j+1]) {
+                    var temp: int = ids[j];
+                    ids[j] = ids[j+1];
+                    ids[j+1] = temp;
+                }
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        return ids;
+    }
+
+    sync func executeCommand(payload: Payload) {
+        if (payload.kind == 2) {
+             return ();
+        }
+
+        // TODO: actually execute command.
+    }
+
+    func TryExecute() {
+        var G: list<int> = buildExecutionGraph();
+
+        var sccs: list<list<int>> = getSCCs(G);
+
+        for (scc in sccs) {
+            var sortedSCC: list<int> = sortIDs(scc);
+
+            for (id in sortedSCC) {
+                var cmd: Command = commands[id];
+                var isNop: bool = (cmd.payload.kind == 2); 
+                
+                if (!exists(executed, id) and !isNop) {
+                    executeCommand(cmd.payload);
+                    executed[id] = true;
+                } 
+                if (!exists(executed, id) and isNop) {
+                    executed[id] = true;
+                }
+            }
+        }
     }
 }
 

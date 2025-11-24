@@ -120,7 +120,7 @@ let init_clients (global_state : state) (prog : program) (num_servers : int)
       init_fn.locals;
     Env.add record_env.local_env "self" (VNode client_id);
 
-    let _ = exec_sync prog record_env init_fn.entry in
+    let _ = exec_sync global_state prog record_env init_fn.entry in
     ()
   done
 
@@ -142,7 +142,7 @@ let init_nodes (global_state : state) (prog : program) (num_servers : int) :
       init_fn.locals;
     Env.add record_env.local_env "self" (VNode node_id);
 
-    let _ = exec_sync prog record_env init_fn.entry in
+    let _ = exec_sync global_state prog record_env init_fn.entry in
     ()
   done
 
