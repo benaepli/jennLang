@@ -308,6 +308,7 @@ let schedule_planned_op (state : state) (program : program)
 let exec_plan (state : state) (program : program) (plan : execution_plan)
     (max_iterations : int) (topology : topology_info)
     (operation_id_counter : int ref) (randomly_delay_msgs : bool) : unit =
+  Hashtbl.clear in_progress_client_ops;
   let plan_engine = ref (PlanEngine.create plan) in
   let current_step = ref 0 in
   let deferred_ops = ref [] in

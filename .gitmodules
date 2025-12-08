@@ -1,6 +1,7 @@
 [submodule "spur"]
 	path = spur
 	url = https://github.com/benaepli/spur.git
+	branch = channels
 [submodule "porcupine"]
 	path = porcupine
 	url = https://github.com/benaepli/jennLang-porcupine

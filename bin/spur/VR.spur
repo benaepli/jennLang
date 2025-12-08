@@ -51,7 +51,7 @@ role Node {
     var applied_op_count: int = 0;
     
     // Concurrency state
-    var pending_requests: map<int, promise<ClientResponse>> = {};
+    var pending_requests: map<int, chan<ClientResponse>> = {};
 
     // Volatile state
     var status: int = 0;
@@ -99,6 +99,11 @@ role Node {
         }
     }
 
+    // Async helper to resolve channels from sync functions
+    func send_async(ch: chan<ClientResponse>, resp: ClientResponse) {
+        send(ch, resp);
+    }
+
     sync func primary_of(v: int) -> Node {
         var num_servers: int = len(replicas);
         return replicas[v % num_servers];
@@ -121,7 +126,7 @@ role Node {
 
             if (cmd.kind == 1) { // Write
                 kv_store = kv_store[cmd.key] := cmd.value!;
-            } elseif (cmd.kind == 0) { // Read
+            } else if (cmd.kind == 0) { // Read
                 if (exists(kv_store, cmd.key)) {
                     result = kv_store[cmd.key];
                 } else {
@@ -139,7 +144,7 @@ role Node {
                     value: result,
                     primary: replicas[self]
                 };
-                resolve_promise(pending_requests[op_n], resp);
+                send_async(pending_requests[op_n], resp);
                 pending_requests = erase(pending_requests, op_n);
             }
 
@@ -187,7 +192,7 @@ role Node {
                 apply_committed_entries();
                 for var i: int = 0; i < len(replicas); i = i + 1 {
                     if (i != self) {
-                        @replicas[i]->Commit(view_number, commit_number);
+                        <-replicas[i]->Commit(view_number, commit_number);
                     }
                 }
             }
@@ -212,8 +217,8 @@ role Node {
             primary: new_primary 
         };
 
-        for (op_n, p) in pending_requests {
-            resolve_promise(p, resp);
+        for (op_n, ch) in pending_requests {
+            send_async(ch, resp);
         }
         pending_requests = {};
         
@@ -249,8 +254,8 @@ role Node {
             value: nil,
             primary: new_primary 
         };
-        for (op_n, p) in pending_requests {
-            resolve_promise(p, resp);
+        for (op_n, ch) in pending_requests {
+            send_async(ch, resp);
         }
         pending_requests = {}; 
         
@@ -269,7 +274,7 @@ role Node {
                     replicas[i]->StartViewChange(view_number, replicas[self]);
                 }
             }
-        } elseif (new_view == view_number and status == 1) {
+        } else if (new_view == view_number and status == 1) {
             if (exists(start_view_change_senders, replica_id)) {
                 return (); // Already have a message from this sender
             }
@@ -320,7 +325,7 @@ role Node {
                         best_normal_view = msg.normal_view;
                         best_op_number = msg.op_number;
                         best_log = msg.log;
-                    } elseif (msg.normal_view == best_normal_view and msg.op_number > best_op_number) {
+                    } else if (msg.normal_view == best_normal_view and msg.op_number > best_op_number) {
                         best_op_number = msg.op_number;
                         best_log = msg.log;
                     }
@@ -476,30 +481,30 @@ role Node {
     }
 
     // Accepts a new command, logs it, and starts the replication process.
-    sync func NewEntry(cmd: Command) -> future<ClientResponse> {
+    sync func NewEntry(cmd: Command) -> chan<ClientResponse> {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) {
             // Not the primary. Return a failure/redirect response.
-            var p_err: promise<ClientResponse> = create_promise();
+            var p_err: chan<ClientResponse> = make(1);
             var resp: ClientResponse = ClientResponse{
                 is_primary: false,
                 key: nil,
                 value: nil,
                 primary: current_primary 
             };
-            resolve_promise(p_err, resp); 
-            return create_future(p_err);
+            send_async(p_err, resp);
+            return p_err;
         }
         if (status != 0) {
-            var p_err: promise<ClientResponse> = create_promise();
+            var p_err: chan<ClientResponse> = make(1);
             var resp: ClientResponse = ClientResponse{
                 is_primary: false,
                 key: nil,
                 value: nil,
                 primary: current_primary 
             };
-            resolve_promise(p_err, resp); 
-            return create_future(p_err);
+            send_async(p_err, resp);
+            return p_err;
         }
 
         op_number = op_number + 1;
@@ -507,7 +512,7 @@ role Node {
         prepare_ok_counts = prepare_ok_counts[op_number] := 0;
 
         // Create a promise for the client to await commitment
-        var p: promise<ClientResponse> = create_promise();
+        var p: chan<ClientResponse> = make(1);
         pending_requests = pending_requests[op_number] := p;
 
         if (len(replicas) == 1) {
@@ -523,21 +528,21 @@ role Node {
         }
         
         // Return the future associated with the promise
-        return create_future(p);
+        return p;
     }
 
     // Accepts a new Write command from a client.
     func Write(key: string, value: string) -> ClientResponse {
         var cmd: Command = Command{ kind: 1, key: key, value: value };
-        var response: future<ClientResponse> = NewEntry(cmd);
-        return await response;
+        var response: chan<ClientResponse> = NewEntry(cmd);
+        return <- response;
     }
 
     // Accepts a new Read command from a client.
     func Read(key: string) -> ClientResponse {
         // A Read is also a log entry to ensure linearizability
         var cmd: Command = Command{ kind: 0, key: key, value: nil };
-        return @NewEntry(cmd);
+        return <- NewEntry(cmd);
     }
     
     func SimulateTimeout() {
@@ -569,7 +574,7 @@ ClientInterface {
         var current_target: Node = dest;
 
         for ;; {
-            var resp: ClientResponse = @current_target->Write(key, value);
+            var resp: ClientResponse = <- current_target->Write(key, value);
 
             if (resp.is_primary == true) {
                 responses = append(responses, (resp, key));
@@ -584,7 +589,7 @@ ClientInterface {
         var current_target: Node = dest;
 
         for ;; {
-            var resp: ClientResponse = @current_target->Read(key);
+            var resp: ClientResponse = <- current_target->Read(key);
 
             if (resp.is_primary == true) {
                 return resp.value;
@@ -597,7 +602,7 @@ ClientInterface {
 
     // Gets the entire KV store from a replica (for debugging/testing).
     func GetKVStore(dest: Node) -> map<string, string> {
-        return @dest->GetKVStore();
+        return <-dest->GetKVStore();
     }
 
     // Triggers a simulated timeout at the destination node.

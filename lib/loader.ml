@@ -164,6 +164,15 @@ let instr_of_yojson json : instr =
       match to_list value with
       | [ l; r ] -> Copy (lhs_of_yojson l, expr_of_yojson r)
       | _ -> failwith "Instr::Copy expects 2 args")
+  | "Async" -> (
+      match to_list value with
+      | [ l; node; f; args ] ->
+          Async
+            ( lhs_of_yojson l,
+              expr_of_yojson node,
+              to_string f,
+              List.map expr_of_yojson (to_list args) )
+      | _ -> failwith "Instr::Async expects 4 args")
   | "SyncCall" -> (
       match to_list value with
       | [ l; f; args ] ->

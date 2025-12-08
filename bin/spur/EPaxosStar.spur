@@ -131,7 +131,7 @@ role Node {
 
         // We need to handle our own node first because of the potential the PreAcceptOK
         // precondition check fails due to a race condition.
-        await PreAccept(request);
+        <- PreAccept(request);
         for node in replicas {
             if (node != replicas[self]) {
                 node->PreAccept(request);

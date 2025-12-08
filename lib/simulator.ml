@@ -51,6 +51,7 @@ type instr =
   | Assign of lhs * expr (* jenndbg probably assigning map values? *)
   | Copy of lhs * expr
   | SyncCall of lhs * string * expr list
+  | Async of lhs * expr * string * expr list
     (* | Write of string * string (*jenndbg write a value *) *)
 [@@deriving ord]
 
@@ -376,6 +377,11 @@ let to_string (l : 'a label) : string =
           "Instr(Assign(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr
           ^ "))"
       | Copy (_, _) -> "instr copy"
+      | Async (lhs, node, func, args) ->
+          "Instr(Async(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr node ^ ", "
+          ^ func ^ ", "
+          ^ String.concat ", " (List.map to_string_expr args)
+          ^ "))"
       | SyncCall (lhs, func_name, actual_exprs) ->
           "Instr(SyncCall(" ^ to_string_lhs lhs ^ ", " ^ func_name ^ ", "
           ^ String.concat ", " (List.map to_string_expr actual_exprs)
@@ -809,6 +815,90 @@ let rec exec_sync (state : state) (program : program) (env : record_env)
           match instruction with
           | Assign (lhs, rhs) -> store lhs (eval env rhs) env
           | Copy (lhs, rhs) -> copy lhs (eval env rhs) env
+          | Async (lhs, node_expr, func_name, actual_exprs) -> (
+              match eval env node_expr with
+              | VNode node_id | VInt node_id ->
+                  let chan_id =
+                    { node = node_id; id = Hashtbl.length state.channels }
+                  in
+                  let chan =
+                    {
+                      capacity = 1;
+                      buffer = Queue.create ();
+                      waiting_readers = Queue.create ();
+                      waiting_writers = Queue.create ();
+                    }
+                  in
+                  Hashtbl.add state.channels chan_id chan;
+
+                  let { entry; formals; locals; _ } =
+                    function_info func_name program
+                  in
+                  let new_env = Env.create 1024 in
+                  (try
+                     List.iter2
+                       (fun formal actual ->
+                         Env.add new_env formal (eval env actual))
+                       formals actual_exprs
+                   with Invalid_argument _ ->
+                     failwith "Mismatched arguments in Async call");
+                  List.iter
+                    (fun (var_name, expr) ->
+                      Env.add new_env var_name (eval env expr))
+                    locals;
+                  let origin_node = expect_node (load "self" env) in
+
+                  let continuation result_val =
+                    if not (Queue.is_empty chan.waiting_readers) then (
+                      let reader, reader_lhs = Queue.pop chan.waiting_readers in
+                      let reader_env =
+                        {
+                          local_env = reader.env;
+                          node_env = state.nodes.(reader.node);
+                        }
+                      in
+                      store reader_lhs result_val reader_env;
+
+                      state.waiting_records <-
+                        List.filter (fun r -> r != reader) state.waiting_records;
+
+                      if
+                        BatSet.Int.mem reader.node
+                          state.crash_info.currently_crashed
+                      then
+                        state.crash_info.queued_messages <-
+                          (reader.node, reader)
+                          :: state.crash_info.queued_messages
+                      else DA.add state.runnable_records reader)
+                    else Queue.push result_val chan.buffer
+                  in
+
+                  let new_record =
+                    {
+                      node = node_id;
+                      origin_node;
+                      pc = entry;
+                      continuation;
+                      env = new_env;
+                      id = -1;
+                      x = 0.5;
+                      f = (fun x -> x);
+                    }
+                  in
+
+                  Env.add new_env "self" (VNode node_id);
+                  store lhs (VChannel chan_id) env;
+
+                  if BatSet.Int.mem node_id state.crash_info.currently_crashed
+                  then
+                    state.crash_info.queued_messages <-
+                      (node_id, new_record) :: state.crash_info.queued_messages
+                  else DA.add state.runnable_records new_record
+              | other ->
+                  failwith
+                    (Format.asprintf
+                       "Type error: expected node for Async, got %s"
+                       (type_name other)))
           | SyncCall (lhs, func_name, actual_exprs) ->
               let actual_values = List.map (eval env) actual_exprs in
               let { entry; formals; locals; is_sync; _ } =
@@ -832,6 +922,7 @@ let rec exec_sync (state : state) (program : program) (env : record_env)
                 (fun (var_name, default_expr) ->
                   Env.add callee_env var_name (eval env default_expr))
                 locals;
+
               let callee_record_env =
                 { local_env = callee_env; node_env = env.node_env }
               in
@@ -903,10 +994,26 @@ let rec exec_sync (state : state) (program : program) (env : record_env)
               failwith
                 (Format.asprintf "ForLoopIn on %s (not a collection)"
                    (type_name other)))
+      | MakeChannel (lhs, cap, next) ->
+          let node_id = expect_node (load "self" env) in
+          let id = Hashtbl.length state.channels in
+          let cid = { node = node_id; id } in
+
+          let chan =
+            {
+              capacity = cap;
+              buffer = Queue.create ();
+              waiting_readers = Queue.create ();
+              waiting_writers = Queue.create ();
+            }
+          in
+          Hashtbl.add state.channels cid chan;
+          store lhs (VChannel cid) env;
+          current_pc := next
       | Lock (_, _) | Unlock (_, _) ->
           failwith
             "Runtime Error: 'lock'/'unlock' cannot be used in a 'sync' function"
-      | Pause _ | SpinAwait (_, _) | MakeChannel _ | Send _ | Recv _ ->
+      | Pause _ | SpinAwait (_, _) | Send _ | Recv _ ->
           failwith "Runtime Error: Async operation in 'sync' function"
     done;
     VUnit
@@ -921,6 +1028,93 @@ let exec (state : state) (program : program) (record : record) =
     | Instr (instruction, next) ->
         record.pc <- next;
         (match instruction with
+        | Async (lhs, node_expr, func_name, actual_exprs) ->
+            let target_node_id = expect_node (eval env node_expr) in
+            let actual_values = List.map (eval env) actual_exprs in
+
+            let chan_id =
+              { node = record.node; id = Hashtbl.length state.channels }
+            in
+            let chan =
+              {
+                capacity = 1;
+                buffer = Queue.create ();
+                waiting_readers = Queue.create ();
+                waiting_writers = Queue.create ();
+              }
+            in
+            Hashtbl.add state.channels chan_id chan;
+
+            store lhs (VChannel chan_id) env;
+
+            let { entry; formals; locals; _ } =
+              function_info func_name program
+            in
+
+            let callee_local_env = Env.create 1024 in
+
+            (try
+               List.iter2
+                 (fun f a -> Env.add callee_local_env f a)
+                 formals actual_values
+             with Invalid_argument _ ->
+               failwith "Mismatched arguments in Async call");
+            List.iter
+              (fun (var_name, default_expr) ->
+                let default_val =
+                  match default_expr with
+                  | ENil -> VOption None
+                  | _ -> eval env default_expr
+                in
+                Env.add callee_local_env var_name default_val)
+              locals;
+            let callee_node_env = state.nodes.(target_node_id) in
+            let new_env =
+              { local_env = callee_local_env; node_env = callee_node_env }
+            in
+
+            Env.add new_env.local_env "self" (VNode target_node_id);
+            let continuation result_val =
+              if not (Queue.is_empty chan.waiting_readers) then (
+                let reader, reader_lhs = Queue.pop chan.waiting_readers in
+                let reader_env =
+                  {
+                    local_env = reader.env;
+                    node_env = state.nodes.(reader.node);
+                  }
+                in
+                store reader_lhs result_val reader_env;
+
+                state.waiting_records <-
+                  List.filter (fun r -> r != reader) state.waiting_records;
+
+                if BatSet.Int.mem reader.node state.crash_info.currently_crashed
+                then
+                  state.crash_info.queued_messages <-
+                    (reader.node, reader) :: state.crash_info.queued_messages
+                else DA.add state.runnable_records reader)
+              else Queue.push result_val chan.buffer
+            in
+
+            let new_record =
+              {
+                pc = entry;
+                node = target_node_id;
+                origin_node = record.node;
+                continuation;
+                env = callee_local_env;
+                id = -1;
+                x = 0.5;
+                f = (fun x -> x);
+              }
+            in
+
+            if BatSet.Int.mem target_node_id state.crash_info.currently_crashed
+            then
+              state.crash_info.queued_messages <-
+                (target_node_id, new_record) :: state.crash_info.queued_messages
+            else DA.add state.runnable_records new_record;
+            loop ()
         | SyncCall (lhs, func_name, actual_exprs) ->
             (* Evaluate args in the async env *)
             let actual_values = List.map (eval env) actual_exprs in
@@ -1036,7 +1230,10 @@ let exec (state : state) (program : program) (record : record) =
             }
           in
 
-          DA.add state.runnable_records msg_record;
+          if BatSet.Int.mem cid.node state.crash_info.currently_crashed then
+            state.crash_info.queued_messages <-
+              (cid.node, msg_record) :: state.crash_info.queued_messages
+          else DA.add state.runnable_records msg_record;
 
           record.pc <- next;
           loop ()
