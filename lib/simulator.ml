@@ -39,7 +39,6 @@ type expr =
   | ENil
   | EUnwrap of expr
   | ECoalesce of expr * expr
-  | ECreatePromise
   | ECreateLock
   | ESome of expr
   | EIntToString of expr
@@ -50,12 +49,12 @@ type lhs = LVar of string | LTuple of string list [@@deriving ord]
 
 type instr =
   | Assign of lhs * expr (* jenndbg probably assigning map values? *)
-  | Async of lhs * expr * string * expr list (* jenndbg RPC*)
   | Copy of lhs * expr
-  | Resolve of lhs * expr
   | SyncCall of lhs * string * expr list
     (* | Write of string * string (*jenndbg write a value *) *)
 [@@deriving ord]
+
+type channel_id = { node : int; id : int }
 
 (*
  * We use mutually recursive modules and types to define 'value'
@@ -69,17 +68,12 @@ module rec Value : sig
     | VMap of t ValueMap.t
     | VList of t list
     | VOption of t option
-    | VFuture of future_value
+    | VChannel of channel_id
     | VLock of bool ref
     | VNode of int
     | VString of string
     | VUnit
     | VTuple of t array
-
-  and future_value = {
-    mutable value : t option;
-    mutable waiters : (t -> unit) list;
-  }
 end = struct
   type t =
     | VInt of int
@@ -87,17 +81,12 @@ end = struct
     | VMap of t ValueMap.t
     | VList of t list
     | VOption of t option
-    | VFuture of future_value
+    | VChannel of channel_id
     | VLock of bool ref
     | VNode of int
     | VString of string
     | VUnit
     | VTuple of t array
-
-  and future_value = {
-    mutable value : t option;
-    mutable waiters : (t -> unit) list;
-  }
 end
 
 and ValueKey : sig
@@ -136,7 +125,9 @@ end = struct
     | VTuple a1, VTuple a2 -> compare_array compare a1 a2
     | VList l1, VList l2 -> List.compare compare l1 l2
     | VMap m1, VMap m2 -> ValueMap.compare compare m1 m2
-    | VFuture f1, VFuture f2 -> if f1 == f2 then 0 else 1
+    | VChannel c1, VChannel c2 ->
+        let n = Int.compare c1.node c2.node in
+        if n <> 0 then n else Int.compare c1.id c2.id
     | VLock l1, VLock l2 -> if l1 == l2 then 0 else 1
     (* Cross-type comparisons *)
     | VInt _, _ -> -1
@@ -157,8 +148,8 @@ end = struct
     | _, VList _ -> 1
     | VMap _, _ -> -1
     | _, VMap _ -> 1
-    | VFuture _, _ -> -1
-    | _, VFuture _ -> 1
+    | VChannel _, _ -> -1
+    | _, VChannel _ -> 1
 
   let equal v1 v2 = compare v1 v2 = 0
 
@@ -172,7 +163,7 @@ end = struct
     | VOption o -> ( match o with None -> 1 | Some v' -> 17 * hash v')
     | VTuple a -> Array.fold_left (fun acc x -> (23 * acc) + hash x) 5 a
     | VList l -> Hashtbl.hash l
-    | VFuture f -> Hashtbl.hash f
+    | VChannel c -> Hashtbl.hash c
     | VLock l -> Hashtbl.hash l
     | VMap m -> Hashtbl.hash m
 end
@@ -186,17 +177,12 @@ type value = Value.t =
   | VMap of value ValueMap.t
   | VList of value list
   | VOption of value option
-  | VFuture of Value.future_value
+  | VChannel of channel_id
   | VLock of bool ref
   | VNode of int
   | VString of string
   | VUnit
   | VTuple of value array
-
-type future_value = Value.future_value = {
-  mutable value : value option;
-  mutable waiters : (value -> unit) list;
-}
 
 (* Get a human-readable type name for error messages *)
 let type_name = function
@@ -206,7 +192,7 @@ let type_name = function
   | VMap _ -> "map"
   | VList _ -> "list"
   | VOption _ -> "option"
-  | VFuture _ -> "future"
+  | VChannel _ -> "channel"
   | VLock _ -> "lock"
   | VNode _ -> "node"
   | VUnit -> "unit"
@@ -248,12 +234,12 @@ let expect_list v =
       failwith
         (Format.asprintf "Type error: expected list, got %s" (type_name v))
 
-let expect_future v =
+let expect_channel v =
   match v with
-  | VFuture f -> f
+  | VChannel c -> c
   | _ ->
       failwith
-        (Format.asprintf "Type error: expected future, got %s" (type_name v))
+        (Format.asprintf "Type error: expected channel, got %s" (type_name v))
 
 let expect_lock v =
   match v with
@@ -293,7 +279,9 @@ end)
 type 'a label =
   | Instr of instr * 'a (* jenndbg assignments or RPCs *)
   | Pause of 'a (* Insert pause to allow the scheduler to interrupt! *)
-  | Await of lhs * expr * 'a
+  | MakeChannel of lhs * int * 'a (* lhs = make_channel(capacity) *)
+  | Send of expr * expr * 'a (* send(chan, val) *)
+  | Recv of lhs * expr * 'a (* lhs = recv(chan) *)
   | SpinAwait of expr * 'a
   | Return of expr (* jenndbg return...I guess? *)
   (*| Read (* jenndbg read a value *)*)
@@ -370,7 +358,6 @@ let rec to_string_expr (e : expr) : string =
   | EUnwrap e -> "EUnwrap(" ^ to_string_expr e ^ ")"
   | ECoalesce (e1, e2) ->
       "ECoalesce(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
-  | ECreatePromise -> "ECreatePromise"
   | ECreateLock -> "ECreateLock"
   | ESome e -> "ESome(" ^ to_string_expr e ^ ")"
   | EIntToString e -> "EIntToString(" ^ to_string_expr e ^ ")"
@@ -385,22 +372,21 @@ let to_string (l : 'a label) : string =
   match l with
   | Instr (i, _) -> (
       match i with
-      | Async (_, n, f, _) ->
-          "instr async to " ^ to_string_expr n ^ " with " ^ f
       | Assign (lhs, expr) ->
           "Instr(Assign(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr
           ^ "))"
       | Copy (_, _) -> "instr copy"
-      | Resolve (lhs, expr) ->
-          "Instr(Resolve(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr
-          ^ "))"
       | SyncCall (lhs, func_name, actual_exprs) ->
           "Instr(SyncCall(" ^ to_string_lhs lhs ^ ", " ^ func_name ^ ", "
           ^ String.concat ", " (List.map to_string_expr actual_exprs)
           ^ "))")
   | Pause _ -> "Pause"
-  | Await (lhs, expr, _) ->
-      "Await(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr expr ^ ")"
+  | MakeChannel (lhs, cap, _) ->
+      "MakeChannel(" ^ to_string_lhs lhs ^ ", " ^ string_of_int cap ^ ")"
+  | Send (chan, v, _) ->
+      "Send(" ^ to_string_expr chan ^ ", " ^ to_string_expr v ^ ")"
+  | Recv (lhs, chan, _) ->
+      "Recv(" ^ to_string_lhs lhs ^ ", " ^ to_string_expr chan ^ ")"
   | SpinAwait (expr, _) -> "SpinAwait(" ^ to_string_expr expr ^ ")"
   | Return _ -> "Return"
   | Cond (expr, _, _) -> "Cond(" ^ to_string_expr expr ^ ", _, _)"
@@ -427,10 +413,8 @@ let rec to_string_value (v : value) : string =
       "VOption("
       ^ (match o with Some v -> to_string_value v | None -> "None")
       ^ ")"
-  | VFuture fut -> (
-      match fut.value with
-      | None -> "Future(pending)"
-      | Some v -> "Future(" ^ to_string_value v ^ ")")
+  | VChannel c ->
+      "VChannel(" ^ string_of_int c.node ^ ":" ^ string_of_int c.id ^ ")"
   | VLock r -> "VLock(" ^ string_of_bool !r ^ ")"
   | VNode n -> "VNode(" ^ string_of_int n ^ ")"
   | VString s -> "" ^ s ^ ""
@@ -499,6 +483,13 @@ type record = {
   f : float -> float (* updates x every time this record is not chosen *);
 }
 
+type channel_state = {
+  capacity : int;
+  buffer : value Queue.t;
+  mutable waiting_readers : (record * lhs) Queue.t;
+  mutable waiting_writers : (record * value) Queue.t;
+}
+
 type op_kind = Invocation | Response
 
 type operation = {
@@ -521,10 +512,12 @@ type state = {
   nodes : value Env.t array;
   mutable runnable_records : record DA.t;
   mutable waiting_records : record list;
+  channels : (channel_id, channel_state) Hashtbl.t;
   history : operation DA.t;
   mutable free_clients :
     int list (* client ids should be valid indexes into nodes *);
   crash_info : crash_info;
+  mutable delivery_pc : int option;
 }
 
 (* Execution environment of an activation record: local variables +
@@ -554,14 +547,6 @@ let load (var : string) (env : record_env) : value =
     with Not_found ->
       Log.err (fun m -> m "load fail: %s" var);
       failwith "Variable not found")
-
-(* Helper to wake up records waiting on a future *)
-let wake_waiters (fut : future_value) : unit =
-  match fut.value with
-  | Some value ->
-      List.iter (fun callback -> callback value) fut.waiters;
-      fut.waiters <- []
-  | None -> failwith "Cannot wake waiters on unresolved future"
 
 (* Helper to update a collection (map or list) with a new value *)
 let update_collection (col : value) (key : value) (vl : value) : value =
@@ -644,8 +629,8 @@ let rec eval (env : record_env) (expr : expr) : value =
       (* Reference types that cannot be meaningfully compared *)
       | VMap _, _ | _, VMap _ ->
           failwith "Cannot compare maps for equality (reference type)"
-      | VFuture _, _ | _, VFuture _ ->
-          failwith "Cannot compare futures for equality (reference type)"
+      | VChannel _, _ | _, VChannel _ ->
+          failwith "Cannot compare channels for equality (reference type)"
       | VLock _, _ | _, VLock _ ->
           failwith "Cannot compare locks for equality (reference type)"
       (* Different types return false *)
@@ -759,7 +744,6 @@ let rec eval (env : record_env) (expr : expr) : value =
       match expect_option (eval env e_opt) with
       | Some v -> v
       | None -> eval env e_default)
-  | ECreatePromise -> VFuture { value = None; waiters = [] }
   | ECreateLock -> VLock (ref false)
   | ESome e -> VOption (Some (eval env e))
   | EIntToString e -> VString (string_of_int (expect_int (eval env e)))
@@ -789,6 +773,29 @@ let function_info name program =
   with Not_found ->
     Log.err (fun m -> m "function %s is not defined in program.functions" name);
     failwith "Function not found"
+
+let get_delivery_pc (state : state) (program : program) : int =
+  match state.delivery_pc with
+  | Some pc -> pc
+  | None ->
+      (* Create delivery code:
+         Send(EVar "chan", EVar "val", next)
+         Return(EUnit)
+      *)
+      let cfg = program.cfg in
+      let send_pc = DA.length cfg in
+      let return_pc = send_pc + 1 in
+
+      (* We need to add the vertices. *)
+      (* But wait, CFG.fresh_vertex adds a dummy instruction. We should use CFG.create_vertex if possible or set_label. *)
+      (* CFG.create_vertex takes a label and adds it. *)
+      let _ =
+        CFG.create_vertex cfg (Send (EVar "chan", EVar "val", return_pc))
+      in
+      let _ = CFG.create_vertex cfg (Return EUnit) in
+
+      state.delivery_pc <- Some send_pc;
+      send_pc
 
 let rec exec_sync (state : state) (program : program) (env : record_env)
     (start_pc : CFG.vertex) : value =
@@ -830,81 +837,7 @@ let rec exec_sync (state : state) (program : program) (env : record_env)
               in
               Env.add callee_record_env.local_env "self" (load "self" env);
               let result = exec_sync state program callee_record_env entry in
-              store lhs result env
-          | Async (lhs, node, func, actuals) -> (
-              match eval env node with
-              | VNode node_id | VInt node_id ->
-                  let new_future = { value = None; waiters = [] } in
-                  let { entry; formals; locals; _ } =
-                    function_info func program
-                  in
-                  let new_env = Env.create 1024 in
-                  (try
-                     List.iter2
-                       (fun formal actual ->
-                         Env.add new_env formal (eval env actual))
-                       formals actuals
-                   with Invalid_argument _ ->
-                     failwith "Mismatched arguments in function call");
-                  List.iter
-                    (fun (var_name, expr) ->
-                      Env.add new_env var_name (eval env expr))
-                    locals;
-
-                  (* We need to find the current node ID. 
-                   In exec_sync, 'self' is loaded in the env. *)
-                  let origin_node = expect_node (load "self" env) in
-
-                  let new_record =
-                    {
-                      node = node_id;
-                      origin_node;
-                      pc = entry;
-                      continuation =
-                        (fun value ->
-                          new_future.value <- Some value;
-                          wake_waiters new_future);
-                      env = new_env;
-                      id = -1;
-                      x = 0.5;
-                      f = (fun x -> x);
-                    }
-                  in
-                  store lhs (VFuture new_future) env;
-
-                  if BatSet.Int.mem node_id state.crash_info.currently_crashed
-                  then
-                    state.crash_info.queued_messages <-
-                      (node_id, new_record) :: state.crash_info.queued_messages
-                  else DA.add state.runnable_records new_record
-              | other ->
-                  failwith
-                    (Format.asprintf "Type error: expected node for RPC, got %s"
-                       (type_name other)))
-          | Resolve (lhs, rhs) -> (
-              let value_to_resolve = eval env rhs in
-              let promise_val =
-                match lhs with
-                | LVar var -> load var env
-                | LTuple _ ->
-                    failwith
-                      ("Runtime error: Cannot resolve a tuple at "
-                     ^ to_string_lhs lhs)
-              in
-              match promise_val with
-              | VFuture r ->
-                  if r.value = None then (
-                    r.value <- Some value_to_resolve;
-                    wake_waiters r)
-                  else
-                    failwith
-                      ("Runtime error: Promise already resolved at "
-                     ^ to_string_lhs lhs)
-              | other ->
-                  failwith
-                    (Format.asprintf
-                       "Type error: Attempted to resolve \n%s (not a promise)"
-                       (type_name other))))
+              store lhs result env)
       | Cond (cond, bthen, belse) -> (
           match eval env cond with
           | VBool true -> current_pc := bthen
@@ -973,9 +906,8 @@ let rec exec_sync (state : state) (program : program) (env : record_env)
       | Lock (_, _) | Unlock (_, _) ->
           failwith
             "Runtime Error: 'lock'/'unlock' cannot be used in a 'sync' function"
-      | Pause _ | Await (_, _, _) | SpinAwait (_, _) ->
-          failwith
-            "Runtime Error: Async operation (Pause, Await) in 'sync' function"
+      | Pause _ | SpinAwait (_, _) | MakeChannel _ | Send _ | Recv _ ->
+          failwith "Runtime Error: Async operation in 'sync' function"
     done;
     VUnit
   with SyncReturn v -> v
@@ -989,64 +921,6 @@ let exec (state : state) (program : program) (record : record) =
     | Instr (instruction, next) ->
         record.pc <- next;
         (match instruction with
-        | Async (lhs, node, func, actuals) -> (
-            match eval env node with
-            | VNode node_id | VInt node_id ->
-                let new_future = { value = None; waiters = [] } in
-                let { entry; formals; locals; _ } =
-                  function_info func program
-                in
-                let new_env = Env.create 1024 in
-                (try
-                   List.iter2
-                     (fun formal actual ->
-                       Env.add new_env formal (eval env actual))
-                     formals actuals
-                 with Invalid_argument _ ->
-                   Log.err (fun m ->
-                       m
-                         "Func %s mismatches def and caller args\n\
-                         \                    formals: %s\n\n\
-                         \                               actuals: %s"
-                         func
-                         (String.concat ", " formals)
-                         (String.concat ", \n"
-                            (List.map to_string_expr actuals)));
-                   failwith "Mismatched arguments in function call");
-                List.iter
-                  (fun (var_name, expr) ->
-                    Env.add new_env var_name (eval env expr))
-                  locals;
-                let new_record =
-                  {
-                    node = node_id;
-                    origin_node = record.node;
-                    pc = entry;
-                    continuation =
-                      (fun value ->
-                        new_future.value <- Some value;
-                        wake_waiters new_future);
-                    env = new_env;
-                    id = record.id;
-                    x = record.x;
-                    f = record.f;
-                  }
-                in
-                store lhs (VFuture new_future) env;
-                if BatSet.Int.mem node_id state.crash_info.currently_crashed
-                then (
-                  Log.debug (fun m ->
-                      m
-                        "Queueing new message from %d to crashed node %d (from \
-                         exec)"
-                        record.node node_id);
-                  state.crash_info.queued_messages <-
-                    (node_id, new_record) :: state.crash_info.queued_messages)
-                else DA.add state.runnable_records new_record
-            | other ->
-                failwith
-                  (Format.asprintf "Type error: expected node for RPC, got %s"
-                     (type_name other)))
         | SyncCall (lhs, func_name, actual_exprs) ->
             (* Evaluate args in the async env *)
             let actual_values = List.map (eval env) actual_exprs in
@@ -1090,32 +964,114 @@ let exec (state : state) (program : program) (record : record) =
             store lhs return_value env;
             loop ()
         | Assign (lhs, rhs) -> store lhs (eval env rhs) env
-        | Copy (lhs, rhs) -> copy lhs (eval env rhs) env
-        | Resolve (lhs, rhs) -> (
-            let value_to_resolve = eval env rhs in
-            let promise_val =
-              match lhs with
-              | LVar var -> load var env
-              | LTuple _ ->
-                  failwith
-                    ("Runtime error: Cannot resolve a tuple at "
-                   ^ to_string_lhs lhs)
-            in
-            match promise_val with
-            | VFuture fut ->
-                if fut.value = None then (
-                  fut.value <- Some value_to_resolve;
-                  wake_waiters fut)
-                else
-                  failwith
-                    ("Runtime error: Promise already resolved at "
-                   ^ to_string_lhs lhs)
-            | other ->
-                failwith
-                  (Format.asprintf
-                     "Type error: Attempted to resolve %s (not a promise)"
-                     (type_name other))));
+        | Copy (lhs, rhs) -> copy lhs (eval env rhs) env);
         loop ()
+    | MakeChannel (lhs, cap, next) ->
+        let id = Hashtbl.length state.channels in
+        let cid = { node = record.node; id } in
+
+        let chan =
+          {
+            capacity = cap;
+            buffer = Queue.create ();
+            waiting_readers = Queue.create ();
+            waiting_writers = Queue.create ();
+          }
+        in
+        Hashtbl.add state.channels cid chan;
+
+        store lhs (VChannel cid) env;
+        record.pc <- next;
+        loop ()
+    | Send (chan_expr, val_expr, next) ->
+        let cid = expect_channel (eval env chan_expr) in
+        let v = eval env val_expr in
+
+        if cid.node = record.node then
+          (* --- LOCAL SEND --- *)
+          let chan = Hashtbl.find state.channels cid in
+
+          (* Priority 1: Handoff directly to a waiting reader *)
+          if not (Queue.is_empty chan.waiting_readers) then (
+            let reader, reader_lhs = Queue.pop chan.waiting_readers in
+            (* Write value to reader's memory *)
+            let reader_env =
+              { local_env = reader.env; node_env = state.nodes.(reader.node) }
+            in
+            store reader_lhs v reader_env;
+            (* Wake reader *)
+            DA.add state.runnable_records reader;
+            (* We (the sender) can proceed immediately *)
+            record.pc <- next;
+            loop () (* Priority 2: Buffer has space *))
+          else if Queue.length chan.buffer < chan.capacity then (
+            Queue.push v chan.buffer;
+            record.pc <- next;
+            loop ())
+          (* Priority 3: Block (Buffer full, no readers) *)
+            else Queue.push (record, v) chan.waiting_writers
+          (* Do NOT call loop(); this record is now suspended *)
+        else
+          (* --- REMOTE SEND (Networked) --- *)
+          let delivery_pc = get_delivery_pc state program in
+
+          (* Create env for delivery record *)
+          let new_env = Env.create 16 in
+          Env.add new_env "chan" (VChannel cid);
+          Env.add new_env "val" v;
+          Env.add new_env "self" (VNode cid.node);
+
+          (* Run as if on dest node *)
+          let msg_record =
+            {
+              node = cid.node;
+              origin_node = record.node;
+              pc = delivery_pc;
+              continuation = (fun _ -> ());
+              (* Should not return anything *)
+              env = new_env;
+              id = -1;
+              x = 0.5;
+              f = (fun x -> x);
+            }
+          in
+
+          DA.add state.runnable_records msg_record;
+
+          record.pc <- next;
+          loop ()
+    | Recv (lhs, chan_expr, next) ->
+        let cid = expect_channel (eval env chan_expr) in
+        if cid.node <> record.node then
+          failwith "Cannot read remote channel directly";
+
+        let chan = Hashtbl.find state.channels cid in
+
+        (* Priority 1: Data exists in buffer *)
+        if not (Queue.is_empty chan.buffer) then (
+          let v = Queue.pop chan.buffer in
+          store lhs v env;
+
+          (* Optimization: If a writer was blocked, wake them up now! *)
+          if not (Queue.is_empty chan.waiting_writers) then (
+            let writer, write_val = Queue.pop chan.waiting_writers in
+            Queue.push write_val chan.buffer;
+            (* Move blocked write into newly freed slot *)
+            DA.add state.runnable_records writer);
+
+          record.pc <- next;
+          loop ()
+          (* Priority 2: Writer is waiting (and buffer was empty / cap=0) *))
+        else if not (Queue.is_empty chan.waiting_writers) then (
+          let writer, write_val = Queue.pop chan.waiting_writers in
+          store lhs write_val env;
+          (* Direct handoff *)
+          DA.add state.runnable_records writer;
+          record.pc <- next;
+          loop ())
+        (* Priority 3: Block (No data) *)
+          else
+          Queue.push (record, lhs) chan.waiting_readers (* Suspend execution *)
     | Cond (cond, bthen, belse) ->
         (match eval env cond with
         | VBool true -> record.pc <- bthen
@@ -1125,41 +1081,6 @@ let exec (state : state) (program : program) (record : record) =
               (Format.asprintf "Type error in condition: expected bool, got %s"
                  (type_name other)));
         loop ()
-    | Await (lhs, expr, next) -> (
-        match eval env expr with
-        | VFuture fut -> (
-            match fut.value with
-            | Some value ->
-                record.pc <- next;
-                store lhs value env;
-                loop ()
-            | None ->
-                let resume_callback value =
-                  record.pc <- next;
-                  store lhs value env;
-
-                  if
-                    BatSet.Int.mem record.node
-                      state.crash_info.currently_crashed
-                  then (
-                    (* Node is crashed: Queue for recovery *)
-                    Log.debug (fun m ->
-                        m
-                          "Queueing (from waiter) task from %d for crashed \
-                           node %d"
-                          record.origin_node record.node);
-                    state.crash_info.queued_messages <-
-                      (record.node, record) :: state.crash_info.queued_messages)
-                  else
-                    (* Node is alive: Add back to runnable records *)
-                    DA.add state.runnable_records record
-                in
-                fut.waiters <- resume_callback :: fut.waiters;
-                state.waiting_records <- record :: state.waiting_records)
-        | other ->
-            failwith
-              (Format.asprintf "Type error in await: expected future, got %s"
-                 (type_name other)))
     | SpinAwait (expr, next) -> (
         match eval env expr with
         | VBool b ->
@@ -1296,62 +1217,63 @@ let schedule_record (state : state) (program : program)
     in
     () (* Record is already removed, just drop it *)
   else
-    let env = { local_env = r.env; node_env = state.nodes.(r.node) } in
     match CFG.label program.cfg r.pc with
-    | Instr (i, _) -> (
-        match i with
-        | Async (_, node, _, _) ->
-            let node_id = expect_node (eval env node) in
-            let src_node = r.node in
-            let dest_node = node_id in
+    | _ ->
+        (* Generic fault injection for any cross-node task *)
+        let src_node = r.origin_node in
+        let dest_node = r.node in
 
+        if src_node <> dest_node then (
+          if
             (* If destination is crashed, queue the message *)
-            if BatSet.Int.mem dest_node state.crash_info.currently_crashed then (
-              Log.debug (fun m ->
-                  m "  Queueing message from %d to crashed node %d (step %d)"
-                    src_node dest_node state.crash_info.current_step);
-              state.crash_info.queued_messages <-
-                (dest_node, r) :: state.crash_info.queued_messages)
-            else
-              let should_execute = ref true in
+            BatSet.Int.mem dest_node state.crash_info.currently_crashed
+          then (
+            Log.debug (fun m ->
+                m "  Queueing message from %d to crashed node %d (step %d)"
+                  src_node dest_node state.crash_info.current_step);
+            state.crash_info.queued_messages <-
+              (dest_node, r) :: state.crash_info.queued_messages)
+          else
+            let should_execute = ref true in
 
-              (* Only apply fault injection to non-local calls *)
-              if src_node <> dest_node then (
-                if
-                  randomly_drop_msgs
-                  &&
-                  (Random.self_init ();
-                   Random.float 1.0 < 0.3)
-                then should_execute := false;
+            if
+              randomly_drop_msgs
+              &&
+              (Random.self_init ();
+               Random.float 1.0 < 0.3)
+            then should_execute := false;
 
-                if
-                  cut_tail_from_mid
-                  && ((src_node = 2 && dest_node = 1)
-                     || (dest_node = 2 && src_node = 1))
-                then should_execute := false;
+            if
+              cut_tail_from_mid
+              && ((src_node = 2 && dest_node = 1)
+                 || (dest_node = 2 && src_node = 1))
+            then should_execute := false;
 
-                if sever_all_but_mid then
-                  if dest_node = 2 && not (src_node = 1) then
-                    should_execute := false
-                  else if src_node = 2 && not (dest_node = 1) then
-                    should_execute := false;
+            if sever_all_but_mid then
+              if dest_node = 2 && not (src_node = 1) then
+                should_execute := false
+              else if src_node = 2 && not (dest_node = 1) then
+                should_execute := false;
 
-                if
-                  List.mem src_node partition_away_nodes
-                  || List.mem dest_node partition_away_nodes
-                then should_execute := false;
+            if
+              List.mem src_node partition_away_nodes
+              || List.mem dest_node partition_away_nodes
+            then should_execute := false;
 
-                if randomly_delay_msgs then
-                  if
-                    Random.self_init ();
-                    Random.float 1.0 < r.x
-                  then (
-                    r.x <- r.f r.x;
-                    should_execute := false));
+            if randomly_delay_msgs then
+              if
+                Random.self_init ();
+                Random.float 1.0 < r.x
+              then (
+                r.x <- r.f r.x;
+                should_execute := false;
+                (* Re-queue the delayed record *)
+                DA.add state.runnable_records r);
 
-              if !should_execute then exec state program r
-        | _ -> exec state program r)
-    | _ -> exec state program r
+            if !should_execute then exec state program r)
+        else
+          (* Local task, just execute *)
+          exec state program r
 
 (* Helper function to schedule a thread *)
 let schedule_thread (state : state) (program : program) (func_name : string)

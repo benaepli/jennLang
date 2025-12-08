@@ -16,7 +16,6 @@ let rec expr_of_yojson json : expr =
   (* Handle Serde's default for unit variants *)
   | `String "EUnit" -> EUnit
   | `String "ENil" -> ENil
-  | `String "ECreatePromise" -> ECreatePromise
   | `String "ECreateLock" -> ECreateLock
   (* Handle adjacently tagged variants*)
   | `Assoc [ (key, value) ] -> (
@@ -161,23 +160,10 @@ let instr_of_yojson json : instr =
       match to_list value with
       | [ l; r ] -> Assign (lhs_of_yojson l, expr_of_yojson r)
       | _ -> failwith "Instr::Assign expects 2 args")
-  | "Async" -> (
-      match to_list value with
-      | [ l; n; f; args ] ->
-          Async
-            ( lhs_of_yojson l,
-              expr_of_yojson n,
-              to_string f,
-              List.map expr_of_yojson (to_list args) )
-      | _ -> failwith "Instr::Async expects 4 args")
   | "Copy" -> (
       match to_list value with
       | [ l; r ] -> Copy (lhs_of_yojson l, expr_of_yojson r)
       | _ -> failwith "Instr::Copy expects 2 args")
-  | "Resolve" -> (
-      match to_list value with
-      | [ l; r ] -> Resolve (lhs_of_yojson l, expr_of_yojson r)
-      | _ -> failwith "Instr::Resolve expects 2 args")
   | "SyncCall" -> (
       match to_list value with
       | [ l; f; args ] ->
@@ -196,10 +182,18 @@ let label_of_yojson json : CFG.vertex label =
       | [ i; v ] -> Instr (instr_of_yojson i, to_int v)
       | _ -> failwith "Label::Instr expects 2 args")
   | "Pause" -> Pause (to_int value)
-  | "Await" -> (
+  | "MakeChannel" -> (
       match to_list value with
-      | [ l; e; v ] -> Await (lhs_of_yojson l, expr_of_yojson e, to_int v)
-      | _ -> failwith "Label::Await expects 3 args")
+      | [ l; c; n ] -> MakeChannel (lhs_of_yojson l, to_int c, to_int n)
+      | _ -> failwith "Label::MakeChannel expects 3 args")
+  | "Send" -> (
+      match to_list value with
+      | [ c; v; n ] -> Send (expr_of_yojson c, expr_of_yojson v, to_int n)
+      | _ -> failwith "Label::Send expects 3 args")
+  | "Recv" -> (
+      match to_list value with
+      | [ l; c; n ] -> Recv (lhs_of_yojson l, expr_of_yojson c, to_int n)
+      | _ -> failwith "Label::Recv expects 3 args")
   | "SpinAwait" -> (
       match to_list value with
       | [ e; v ] -> SpinAwait (expr_of_yojson e, to_int v)

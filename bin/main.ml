@@ -26,6 +26,7 @@ let create_fresh_global_state (num_servers : int) (num_clients : int) : state =
         (fun _ -> Env.create 1024);
     runnable_records = DA.create ();
     waiting_records = [];
+    channels = Hashtbl.create 1024;
     history = DA.create ();
     free_clients = List.init num_clients (fun i -> num_servers + i);
     crash_info =
@@ -35,6 +36,7 @@ let create_fresh_global_state (num_servers : int) (num_clients : int) : state =
         current_step = 0;
         queued_messages = [];
       };
+    delivery_pc = None;
   }
 
 let sync_exec (global_state : state) (prog : program)

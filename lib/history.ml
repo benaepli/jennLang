@@ -8,11 +8,12 @@ let rec json_of_value (v : value) : Yojson.Basic.t =
   | VBool b -> `Assoc [ ("type", `String "VBool"); ("value", `Bool b) ]
   | VString s -> `Assoc [ ("type", `String "VString"); ("value", `String s) ]
   | VNode n -> `Assoc [ ("type", `String "VNode"); ("value", `Int n) ]
-  | VFuture f ->
-      let value_json =
-        match f.value with Some v -> json_of_value v | None -> `Null
-      in
-      `Assoc [ ("type", `String "VFuture"); ("value", value_json) ]
+  | VChannel c ->
+      `Assoc
+        [
+          ("type", `String "VChannel");
+          ("value", `Assoc [ ("node", `Int c.node); ("id", `Int c.id) ]);
+        ]
   | VMap m ->
       let pairs = ValueMap.fold (fun k v acc -> (k, v) :: acc) m [] in
       (* Represent map as an array of [key, value] pairs *)
