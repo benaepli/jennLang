@@ -28,7 +28,7 @@ let rec json_of_value (v : value) : Yojson.Basic.t =
       in
       `Assoc [ ("type", `String "VOption"); ("value", value_json) ]
   | VList l ->
-      let items_json = List.map json_of_value !l in
+      let items_json = List.map json_of_value l in
       `Assoc [ ("type", `String "VList"); ("value", `List items_json) ]
   | VUnit -> `Assoc [ ("type", `String "VUnit"); ("value", `Null) ]
   | VTuple t ->

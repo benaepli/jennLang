@@ -71,7 +71,7 @@ let init_topology (topology : topology_info) (global_state : state)
         let node_id = i in
         let env = Env.create 1024 in
         let peers_list =
-          VList (ref (List.init topology.num_servers (fun j -> VNode j)))
+          VList (List.init topology.num_servers (fun j -> VNode j))
         in
         let actuals = [ VInt node_id; peers_list ] in
 

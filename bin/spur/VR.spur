@@ -120,15 +120,15 @@ role Node {
             var result: string? = nil;
 
             if (cmd.kind == 1) { // Write
-                kv_store[cmd.key] = cmd.value!;
+                kv_store = store(kv_store, cmd.key, cmd.value!);
             } elseif (cmd.kind == 0) { // Read
                 if (exists(kv_store, cmd.key)) {
                     result = kv_store[cmd.key];
                 } else {
-                    println("Impossible 1.");
+                    println("Read of an unwritten key.");
                 }
             } else {
-                println("Impossible 2.");
+                println("Impossible!");
             }
 
             if (exists(pending_requests, op_n)) {
@@ -140,7 +140,7 @@ role Node {
                     primary: replicas[self]
                 };
                 resolve_promise(pending_requests[op_n], resp);
-                erase(pending_requests, op_n);
+                pending_requests = erase(pending_requests, op_n);
             }
             
             applied_op_count = applied_op_count + 1;
@@ -152,10 +152,10 @@ role Node {
         if (status != 0) { return (); }
         if (other_op_number <= op_number) { return (); }
         if (!exists(prepare_buffer, other_op_number)) {
-            prepare_buffer[other_op_number] = PrepareMsg {
+            prepare_buffer = store(prepare_buffer, other_op_number, PrepareMsg {
                 request: other_request,
                 commit_number: other_commit_number
-            };
+            });
         }
         for (; exists(prepare_buffer, op_number + 1); ) {
             var next_op: int = op_number + 1;
@@ -170,7 +170,7 @@ role Node {
             }
             rpc_call(primary_of(view_number), PrepareOK(view_number, op_number, replicas[self]));
 
-            erase(prepare_buffer, next_op);
+            prepare_buffer = erase(prepare_buffer, next_op);
         }
     }
 
@@ -178,11 +178,11 @@ role Node {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] == current_primary and other_view == view_number and status == 0) {
             if (!exists(prepare_ok_counts, other_op_number)) {
-                prepare_ok_counts[other_op_number] = 0;
+                prepare_ok_counts = store(prepare_ok_counts, other_op_number, 0);
             }
-            prepare_ok_counts[other_op_number] = prepare_ok_counts[other_op_number] + 1;
-            var mid: int = f();
-            if (prepare_ok_counts[other_op_number] >= mid and other_op_number > commit_number) {
+            prepare_ok_counts = store(prepare_ok_counts, other_op_number, prepare_ok_counts[other_op_number] + 1);
+            var quorum: int = f() + 1;
+            if (prepare_ok_counts[other_op_number] >= quorum and other_op_number > commit_number) {
                 commit_number = other_op_number;
                 apply_committed_entries();
                 for (var i: int = 0; i < len(replicas); i = i + 1) {
@@ -218,7 +218,7 @@ role Node {
         pending_requests = {};
         
         start_view_change_senders = {};
-        start_view_change_senders[replicas[self]] = true; 
+        start_view_change_senders = store(start_view_change_senders, replicas[self], true); 
         
         do_view_change_senders = {};
         do_view_change_messages = [];
@@ -258,6 +258,10 @@ role Node {
     }
 
     func StartViewChange(new_view: int, replica_id: Node) {
+        if (status == 2) {
+            return ();
+        }
+
         if (new_view > view_number) {
             enter_view_change(new_view);
             for (var i: int = 0; i < len(replicas); i = i + 1) {
@@ -269,7 +273,7 @@ role Node {
             if (exists(start_view_change_senders, replica_id)) {
                 return (); // Already have a message from this sender
             }
-            start_view_change_senders[replica_id] = true;
+            start_view_change_senders = store(start_view_change_senders, replica_id, true);
             
             var f_val: int = (len(replicas) - 1) / 2;
             var quorum: int = f_val + 1;
@@ -291,7 +295,7 @@ role Node {
             if (exists(do_view_change_senders, sender_id)) {
                 return ();
             }
-            do_view_change_senders[sender_id] = true;
+            do_view_change_senders = store(do_view_change_senders, sender_id, true);
             
             do_view_change_messages = append(do_view_change_messages, DoViewChangeMsg{
                 log: sender_log,
@@ -333,6 +337,9 @@ role Node {
     }
 
     func StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
+        if (status == 2) {
+            return ();
+        }
         if (new_view >= view_number) {
             enter_normal_mode(new_view, new_log, new_op_number, new_commit_number);
             var new_primary: Node = primary_of(view_number);
@@ -384,7 +391,7 @@ role Node {
         }
 
         // Store the response
-        recovery_response_senders[sender_id] = true;
+        recovery_response_senders = store(recovery_response_senders, sender_id, true);
         recovery_responses = append(recovery_responses, RecoveryResponseMsg {
             view: other_view,
             nonce: other_nonce,
@@ -469,7 +476,7 @@ role Node {
     }
 
     // Accepts a new command, logs it, and starts the replication process.
-    func NewEntry(cmd: Command) -> future<ClientResponse> {
+    sync func NewEntry(cmd: Command) -> future<ClientResponse> {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) {
             // Not the primary. Return a failure/redirect response.
@@ -497,11 +504,11 @@ role Node {
 
         op_number = op_number + 1;
         log = append(log, LogEntry{view: view_number, op: cmd});
-        prepare_ok_counts[op_number] = 0;
+        prepare_ok_counts = store(prepare_ok_counts, op_number, 0);
 
         // Create a promise for the client to await commitment
         var p: promise<ClientResponse> = create_promise();
-        pending_requests[op_number] = p;
+        pending_requests = store(pending_requests, op_number, p);
 
         if (len(replicas) == 1) {
             commit_number = op_number;
@@ -522,7 +529,7 @@ role Node {
     // Accepts a new Write command from a client.
     func Write(key: string, value: string) -> ClientResponse {
         var cmd: Command = Command{ kind: 1, key: key, value: value };
-        var response: future<ClientResponse> = @NewEntry(cmd);
+        var response: future<ClientResponse> = NewEntry(cmd);
         return await response;
     }
 
@@ -530,21 +537,14 @@ role Node {
     func Read(key: string) -> ClientResponse {
         // A Read is also a log entry to ensure linearizability
         var cmd: Command = Command{ kind: 0, key: key, value: nil };
-        return @@NewEntry(cmd);
-    }
-
-    func Tick() {
-        var current_primary: Node = primary_of(view_number);
-        if (replicas[self] == current_primary) {
-            for (var i: int = 0; i < len(replicas); i = i + 1) {
-                if (i != self) {
-                    rpc_call(replicas[i], Commit(view_number, commit_number));
-                }
-            }
-        }
+        return @NewEntry(cmd);
     }
     
     func SimulateTimeout() {
+        if (status == 2) { 
+            return (); 
+        }
+
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) { 
             enter_view_change(view_number + 1);

@@ -60,10 +60,9 @@ let generate_base_actions (config : generator_config) : action_stub list =
 type intermediate_event = {
   id : event_id;
   action : event_action;
-  (* What key does this op touch? (key, Read/Write) *)
-  key_op : (string * [ `R | `W ]) option;
   (* Is this part of a pair? (group_id, First/Second) *)
   pair_group : (int * [ `First | `Second ]) option;
+  extra_dependencies : event_id list;
 }
 
 let shuffle_list l =
@@ -83,6 +82,7 @@ let create_intermediate_list (stubs : action_stub list) :
     intermediate_event list =
   let event_id_counter = ref 0 in
   let pair_group_counter = ref 0 in
+  let last_recovery_map = Hashtbl.create 10 in
 
   (* Helper to process a single stub and add its event(s) to the accumulator *)
   let process_stub acc stub =
@@ -91,15 +91,9 @@ let create_intermediate_list (stubs : action_stub list) :
         event_id_counter := !event_id_counter + 1;
         let id = Printf.sprintf "e%d" !event_id_counter in
 
-        (* Extract key operation metadata *)
-        let key_op =
-          match action with
-          | ClientRequest (Write (_, k, _)) -> Some (k, `W)
-          | ClientRequest (Read (_, k)) -> Some (k, `R)
-          | _ -> None
+        let event =
+          { id; action; pair_group = None; extra_dependencies = [] }
         in
-
-        let event = { id; action; key_op; pair_group = None } in
         event :: acc (* Prepend to accumulator *)
     | Paired (action1, action2) ->
         (* Create two events for the pair *)
@@ -112,12 +106,27 @@ let create_intermediate_list (stubs : action_stub list) :
         pair_group_counter := !pair_group_counter + 1;
         let group_id = !pair_group_counter in
 
+        (* Check for serialization dependencies *)
+        let extra_deps =
+          match action1 with
+          | CrashNode s -> (
+              match Hashtbl.find_opt last_recovery_map s with
+              | Some prev_id -> [ prev_id ]
+              | None -> [])
+          | _ -> []
+        in
+
+        (* Update last recovery map *)
+        (match action2 with
+        | RecoverNode s -> Hashtbl.replace last_recovery_map s id2
+        | _ -> ());
+
         let event1 =
           {
             id = id1;
             action = action1;
-            key_op = None;
             pair_group = Some (group_id, `First);
+            extra_dependencies = extra_deps;
           }
         in
 
@@ -125,8 +134,8 @@ let create_intermediate_list (stubs : action_stub list) :
           {
             id = id2;
             action = action2;
-            key_op = None;
             pair_group = Some (group_id, `Second);
+            extra_dependencies = [];
           }
         in
 
@@ -163,14 +172,12 @@ let finalize_plan (config : generator_config) (events : intermediate_event list)
 
   (* We iterate through the list, building our final plan. *)
   (* `seen_events`: A list of all events we've processed so far. *)
-  (* `last_write_map`: A map of {key -> last_write_event_id} *)
-  let final_plan_rev, _, _ =
+  let final_plan_rev, _ =
     List.fold_left
-      (fun (built_plan_rev, seen_events, last_write_map)
-           (current_event : intermediate_event) ->
+      (fun (built_plan_rev, seen_events) (current_event : intermediate_event) ->
         let dependencies = ref [] in
 
-        (* Enforcing logical dependencies *)
+        (* Enforcing logical dependencies (Crash -> Recover) *)
         (match current_event.pair_group with
         | Some (group_id, `Second) -> (
             try
@@ -184,16 +191,12 @@ let finalize_plan (config : generator_config) (events : intermediate_event list)
                  Crash.")
         | _ -> ());
 
-        (* Read/write coherence *)
-        (match current_event.key_op with
-        | Some (key, `R) -> (
-            match EventMap.find_opt key last_write_map with
-            | Some write_id ->
-                dependencies := EventCompleted write_id :: !dependencies
-            | None -> ())
-        | _ -> ());
+        (* Enforcing explicit serialization dependencies *)
+        List.iter
+          (fun dep_id -> dependencies := EventCompleted dep_id :: !dependencies)
+          current_event.extra_dependencies;
 
-        (* Probabilistic *)
+        (* Probabilistic dependencies *)
         List.iter
           (fun (prev_event : intermediate_event) ->
             (* Roll the die for every preceding event *)
@@ -224,16 +227,8 @@ let finalize_plan (config : generator_config) (events : intermediate_event list)
 
         let new_seen_events = current_event :: seen_events in
 
-        let new_last_write_map =
-          match current_event.key_op with
-          | Some (key, `W) -> EventMap.add key current_event.id last_write_map
-          | _ -> last_write_map
-        in
-
-        ( new_planned_event :: built_plan_rev,
-          new_seen_events,
-          new_last_write_map ))
-      ([], [], EventMap.empty) events
+        (new_planned_event :: built_plan_rev, new_seen_events))
+      ([], []) events
   in
 
   (* Un-reverse the list to get the original shuffled order *)

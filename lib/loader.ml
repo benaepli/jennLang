@@ -115,12 +115,6 @@ let rec expr_of_yojson json : expr =
           match to_list value with
           | [ e1; e2 ] -> EMod (expr_of_yojson e1, expr_of_yojson e2)
           | _ -> failwith "EMod expects 2 args")
-      | "EPollForResps" -> (
-          match to_list value with
-          | [ e1; e2 ] -> EPollForResps (expr_of_yojson e1, expr_of_yojson e2)
-          | _ -> failwith "EPollForResps expects 2 args")
-      | "EPollForAnyResp" -> EPollForAnyResp (expr_of_yojson value)
-      | "ENextResp" -> ENextResp (expr_of_yojson value)
       | "EMin" -> (
           match to_list value with
           | [ e1; e2 ] -> EMin (expr_of_yojson e1, expr_of_yojson e2)
@@ -141,6 +135,11 @@ let rec expr_of_yojson json : expr =
           | _ -> failwith "ECoalesce expects 2 args")
       | "ESome" -> ESome (expr_of_yojson value)
       | "EIntToString" -> EIntToString (expr_of_yojson value)
+      | "EStore" -> (
+          match to_list value with
+          | [ e1; e2; e3 ] ->
+              EStore (expr_of_yojson e1, expr_of_yojson e2, expr_of_yojson e3)
+          | _ -> failwith "EStore expects 3 args")
       | _ -> failwith ("Unknown expr key: " ^ key))
   (* Handle malformed JSON *)
   | _ ->
@@ -152,10 +151,6 @@ let lhs_of_yojson json : lhs =
   let key, value = get_variant json in
   match key with
   | "Var" -> LVar (to_string value)
-  | "Access" -> (
-      match to_list value with
-      | [ e1; e2 ] -> LAccess (expr_of_yojson e1, expr_of_yojson e2)
-      | _ -> failwith "Lhs::Access expects 2 args")
   | "Tuple" -> LTuple (List.map to_string (to_list value))
   | _ -> failwith ("Unknown lhs key: " ^ key)
 

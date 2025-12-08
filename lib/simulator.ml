@@ -32,9 +32,6 @@ type expr =
   | ETimes of expr * expr
   | EDiv of expr * expr
   | EMod of expr * expr
-  | EPollForResps of expr * expr
-  | EPollForAnyResp of expr
-  | ENextResp of expr
   | EMin of expr * expr
   | ETuple of expr list
   | ETupleAccess of expr * int
@@ -46,10 +43,10 @@ type expr =
   | ECreateLock
   | ESome of expr
   | EIntToString of expr
+  | EStore of expr * expr * expr
 [@@deriving ord]
 
-type lhs = LVar of string | LAccess of expr * expr | LTuple of string list
-[@@deriving ord]
+type lhs = LVar of string | LTuple of string list [@@deriving ord]
 
 type instr =
   | Assign of lhs * expr (* jenndbg probably assigning map values? *)
@@ -70,7 +67,7 @@ module rec Value : sig
     | VInt of int
     | VBool of bool
     | VMap of t ValueMap.t
-    | VList of t list ref
+    | VList of t list
     | VOption of t option
     | VFuture of future_value
     | VLock of bool ref
@@ -88,7 +85,7 @@ end = struct
     | VInt of int
     | VBool of bool
     | VMap of t ValueMap.t
-    | VList of t list ref
+    | VList of t list
     | VOption of t option
     | VFuture of future_value
     | VLock of bool ref
@@ -106,6 +103,7 @@ end
 and ValueKey : sig
   type t = Value.t
 
+  val compare : t -> t -> int
   val equal : t -> t -> bool
   val hash : t -> int
 end = struct
@@ -113,26 +111,56 @@ end = struct
 
   type t = Value.t
 
-  let rec equal v1 v2 =
+  let compare_array cmp a1 a2 =
+    let len1 = Array.length a1 in
+    let len2 = Array.length a2 in
+    let c = Int.compare len1 len2 in
+    if c <> 0 then c
+    else
+      let rec loop i =
+        if i = len1 then 0
+        else
+          let c = cmp a1.(i) a2.(i) in
+          if c <> 0 then c else loop (i + 1)
+      in
+      loop 0
+
+  let rec compare v1 v2 =
     match (v1, v2) with
-    | VInt i1, VInt i2 -> i1 = i2
-    | VBool b1, VBool b2 -> b1 = b2
-    | VString s1, VString s2 -> s1 = s2
-    | VNode n1, VNode n2 -> n1 = n2
-    | VUnit, VUnit -> true
-    | VOption o1, VOption o2 -> (
-        match (o1, o2) with
-        | None, None -> true
-        | Some v1', Some v2' ->
-            equal v1' v2' (* Options are immutable, so this is fine *)
-        | _ -> false)
-    | VTuple a1, VTuple a2 -> (
-        try Array.for_all2 equal a1 a2 with Invalid_argument _ -> false)
-    | VList l1, VList l2 -> l1 == l2
-    | VFuture f1, VFuture f2 -> f1 == f2
-    | VLock l1, VLock l2 -> l1 == l2
-    | VMap m1, VMap m2 -> m1 == m2
-    | _ -> false
+    | VInt i1, VInt i2 -> Int.compare i1 i2
+    | VBool b1, VBool b2 -> Bool.compare b1 b2
+    | VString s1, VString s2 -> String.compare s1 s2
+    | VNode n1, VNode n2 -> Int.compare n1 n2
+    | VUnit, VUnit -> 0
+    | VOption o1, VOption o2 -> Option.compare compare o1 o2
+    | VTuple a1, VTuple a2 -> compare_array compare a1 a2
+    | VList l1, VList l2 -> List.compare compare l1 l2
+    | VMap m1, VMap m2 -> ValueMap.compare compare m1 m2
+    | VFuture f1, VFuture f2 -> if f1 == f2 then 0 else 1
+    | VLock l1, VLock l2 -> if l1 == l2 then 0 else 1
+    (* Cross-type comparisons *)
+    | VInt _, _ -> -1
+    | _, VInt _ -> 1
+    | VBool _, _ -> -1
+    | _, VBool _ -> 1
+    | VString _, _ -> -1
+    | _, VString _ -> 1
+    | VNode _, _ -> -1
+    | _, VNode _ -> 1
+    | VUnit, _ -> -1
+    | _, VUnit -> 1
+    | VOption _, _ -> -1
+    | _, VOption _ -> 1
+    | VTuple _, _ -> -1
+    | _, VTuple _ -> 1
+    | VList _, _ -> -1
+    | _, VList _ -> 1
+    | VMap _, _ -> -1
+    | _, VMap _ -> 1
+    | VFuture _, _ -> -1
+    | _, VFuture _ -> 1
+
+  let equal v1 v2 = compare v1 v2 = 0
 
   let rec hash v =
     match v with
@@ -149,14 +177,14 @@ end = struct
     | VMap m -> Hashtbl.hash m
 end
 
-and ValueMap : (Hashtbl.S with type key = Value.t) = Hashtbl.Make (ValueKey)
+and ValueMap : (Map.S with type key = Value.t) = Map.Make (ValueKey)
 
 (* Type alias for convenience - expose constructors *)
 type value = Value.t =
   | VInt of int
   | VBool of bool
   | VMap of value ValueMap.t
-  | VList of value list ref
+  | VList of value list
   | VOption of value option
   | VFuture of Value.future_value
   | VLock of bool ref
@@ -255,13 +283,6 @@ let expect_string v =
       failwith
         (Format.asprintf "Type error: expected string, got %s" (type_name v))
 
-(* Run-time value of a left-hand-side *)
-type lvalue =
-  | LVVar of string
-  | LVAccess of (value * value ValueMap.t)
-  | LVAccessList of (value * value list ref)
-  | LVTuple of string list
-
 module Env = Hashtbl.Make (struct
   type t = string
 
@@ -338,10 +359,6 @@ let rec to_string_expr (e : expr) : string =
       "EDiv(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
   | EMod (e1, e2) ->
       "EMod(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
-  | EPollForResps (e1, e2) ->
-      "EPollForResps(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
-  | EPollForAnyResp e -> "EPollForAnyResp(" ^ to_string_expr e ^ ")"
-  | ENextResp e -> "NextResp(" ^ to_string_expr e ^ ")"
   | EMin (e1, e2) ->
       "EMin(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ")"
   | ETuple exprs ->
@@ -357,12 +374,12 @@ let rec to_string_expr (e : expr) : string =
   | ECreateLock -> "ECreateLock"
   | ESome e -> "ESome(" ^ to_string_expr e ^ ")"
   | EIntToString e -> "EIntToString(" ^ to_string_expr e ^ ")"
+  | EStore (e1, e2, e3) ->
+      "EStore(" ^ to_string_expr e1 ^ ", " ^ to_string_expr e2 ^ ", "
+      ^ to_string_expr e3 ^ ")"
 
 let to_string_lhs (l : lhs) : string =
-  match l with
-  | LVar s -> s
-  | LAccess (e1, e2) -> to_string_expr e1 ^ "[" ^ to_string_expr e2 ^ "]"
-  | LTuple lst -> "(" ^ String.concat ", " lst ^ ")"
+  match l with LVar s -> s | LTuple lst -> "(" ^ String.concat ", " lst ^ ")"
 
 let to_string (l : 'a label) : string =
   match l with
@@ -405,7 +422,7 @@ let rec to_string_value (v : value) : string =
                "\t" ^ to_string_value k ^ ": " ^ to_string_value v ^ "\n")
              (ValueMap.fold (fun k v acc -> (k, v) :: acc) m []))
       ^ ")"
-  | VList l -> "VList(" ^ String.concat ", " (List.map to_string_value !l) ^ ")"
+  | VList l -> "VList(" ^ String.concat ", " (List.map to_string_value l) ^ ")"
   | VOption o ->
       "VOption("
       ^ (match o with Some v -> to_string_value v | None -> "None")
@@ -546,6 +563,15 @@ let wake_waiters (fut : future_value) : unit =
       fut.waiters <- []
   | None -> failwith "Cannot wake waiters on unresolved future"
 
+(* Helper to update a collection (map or list) with a new value *)
+let update_collection (col : value) (key : value) (vl : value) : value =
+  match col with
+  | VMap m -> VMap (ValueMap.add key vl m)
+  | VList l ->
+      let idx = expect_int key in
+      VList (List.mapi (fun i x -> if i = idx then vl else x) l)
+  | _ -> failwith "Not a collection"
+
 (* Evaluate an expression in the context of an environment. *)
 let rec eval (env : record_env) (expr : expr) : value =
   match expr with
@@ -554,24 +580,24 @@ let rec eval (env : record_env) (expr : expr) : value =
   | EVar v -> load v env
   | EFind (c, k) -> (
       match eval env c with
-      | VMap map -> ValueMap.find map (eval env k)
+      | VMap map -> ValueMap.find (eval env k) map
       | VList l -> (
-          match !l with
+          match l with
           | [] -> failwith "Cannot index into empty list"
           | _ -> (
               match eval env k with
               | VInt i | VNode i ->
-                  if i < 0 || i >= List.length !l then (
-                    Log.err (fun m -> m "idx %d, len %d" i (List.length !l));
+                  if i < 0 || i >= List.length l then (
+                    Log.err (fun m -> m "idx %d, len %d" i (List.length l));
                     failwith "idx out of range of VList")
-                  else List.nth !l i
+                  else List.nth l i
               | other ->
                   failwith
                     (Format.asprintf "Cannot index into a list with %s"
                        (type_name other))))
       | VString s -> (
           match load s env with
-          | VMap map -> ValueMap.find map (eval env k)
+          | VMap map -> ValueMap.find (eval env k) map
           | _ ->
               failwith
                 "EFind eval fail: cannot index into anything else but map with \
@@ -612,7 +638,7 @@ let rec eval (env : record_env) (expr : expr) : value =
             | hd1 :: tl1, hd2 :: tl2 ->
                 if hd1 = hd2 then list_eq tl1 tl2 else false
           in
-          VBool (list_eq !l1 !l2)
+          VBool (list_eq l1 l2)
       (* Special case: VNode and VInt are interchangeable *)
       | VNode n, VInt i | VInt i, VNode n -> VBool (n = i)
       (* Reference types that cannot be meaningfully compared *)
@@ -627,39 +653,36 @@ let rec eval (env : record_env) (expr : expr) : value =
   | EMap kvp ->
       let rec makemap (kvpairs : (expr * expr) list) : value ValueMap.t =
         match kvpairs with
-        | [] -> ValueMap.create 1024
+        | [] -> ValueMap.empty
         | (k, v) :: rest ->
             let tbl = makemap rest in
-            ValueMap.add tbl (eval env k) (eval env v);
-            tbl
+            ValueMap.add (eval env k) (eval env v) tbl
       in
       VMap (makemap kvp)
   | EList exprs ->
-      let rec makelist (exprs : expr list) : value list ref =
-        match exprs with
-        | [] -> ref []
-        | e :: rest -> ref (eval env e :: !(makelist rest))
+      let rec makelist (exprs : expr list) : value list =
+        match exprs with [] -> [] | e :: rest -> eval env e :: makelist rest
       in
       VList (makelist exprs)
   | EListPrepend (item, ls) ->
       let v = eval env item in
       let l = expect_list (eval env ls) in
-      VList (ref (v :: !l))
+      VList (v :: l)
   | EListAppend (ls, item) ->
       let l = expect_list (eval env ls) in
       let v = eval env item in
-      VList (ref (!l @ [ v ]))
+      VList (l @ [ v ])
   | EListSubsequence (ls, start_idx, end_idx) -> (
       let l = expect_list (eval env ls) in
       let start_idx = expect_int (eval env start_idx) in
       let end_idx = expect_int (eval env end_idx) in
-      match !l with
+      match l with
       | [] -> failwith "EListSubsequence eval fail on empty list"
       | _ ->
           if
             start_idx < 0 || end_idx < 0
-            || start_idx >= List.length !l
-            || end_idx > List.length !l
+            || start_idx >= List.length l
+            || end_idx > List.length l
           then failwith "EListSubsequence eval fail on out of bounds"
           else
             let rec subseq (lst : value list) (start_idx : int) (end_idx : int)
@@ -672,7 +695,7 @@ let rec eval (env : record_env) (expr : expr) : value =
                     else hd :: subseq tl start_idx (end_idx - 1)
                   else subseq tl (start_idx - 1) (end_idx - 1)
             in
-            VList (ref (subseq !l start_idx end_idx)))
+            VList (subseq l start_idx end_idx))
   | EString s -> VString s
   | ELessThan (e1, e2) ->
       VBool (expect_int (eval env e1) < expect_int (eval env e2))
@@ -685,146 +708,32 @@ let rec eval (env : record_env) (expr : expr) : value =
   | EKeyExists (key, mp) ->
       let k = eval env key in
       let m = expect_map (eval env mp) in
-      VBool (ValueMap.mem m k)
+      VBool (ValueMap.mem k m)
   | EMapErase (key, mp) ->
       let k = eval env key in
       let m = expect_map (eval env mp) in
-      ValueMap.remove m k;
-      VMap m
+      VMap (ValueMap.remove k m)
   | EListLen e -> (
       match eval env e with
-      | VList l -> VInt (List.length !l)
-      | VMap m -> VInt (ValueMap.length m)
+      | VList l -> VInt (List.length l)
+      | VMap m -> VInt (ValueMap.cardinal m)
       | other ->
           failwith
             (Format.asprintf "EListLen eval fail on %s (not a collection)"
                (type_name other)))
   | EListAccess (ls, idx) -> (
       let l = expect_list (eval env ls) in
-      match !l with
+      match l with
       | [] -> failwith "EListAccess eval fail on empty list"
       | _ ->
-          if List.length !l <= idx || idx < 0 then
+          if List.length l <= idx || idx < 0 then
             failwith "idx out of range in EListAccess"
-          else List.nth !l idx)
+          else List.nth l idx)
   | EPlus (e1, e2) -> VInt (expect_int (eval env e1) + expect_int (eval env e2))
   | EMinus (e1, e2) -> VInt (expect_int (eval env e1) - expect_int (eval env e2))
   | ETimes (e1, e2) -> VInt (expect_int (eval env e1) * expect_int (eval env e2))
   | EDiv (e1, e2) -> VInt (expect_int (eval env e1) / expect_int (eval env e2))
   | EMod (e1, e2) -> VInt (expect_int (eval env e1) mod expect_int (eval env e2))
-  | EPollForResps (e1, _) -> (
-      match eval env e1 with
-      | VList list_ref -> (
-          match !list_ref with
-          | [] -> failwith "Polling for response on empty list"
-          | _ ->
-              let rec poll_for_response (lst : value list) : int =
-                match lst with
-                | [] -> 0
-                | hd :: tl -> (
-                    match hd with
-                    (* | VFuture fut -> (
-                        match !fut with
-                        | Some _ -> 1 + poll_for_response tl
-                        | None -> poll_for_response tl) *)
-                    | VBool b -> (
-                        match b with
-                        | true -> 1 + poll_for_response tl
-                        | false -> poll_for_response tl)
-                    | _ ->
-                        failwith
-                          "Polling for response that isn't a future or bool")
-              in
-              VInt (poll_for_response !list_ref))
-      | VMap m ->
-          let lst = ValueMap.fold (fun _ v acc -> v :: acc) m [] in
-          let rec poll_for_response (lst : value list) : int =
-            match lst with
-            | [] -> 0
-            | hd :: tl -> (
-                match hd with
-                (* | VFuture fut -> (
-                    match !fut with
-                    | Some _ -> 1 + poll_for_response tl
-                    | None -> poll_for_response tl) *)
-                | VBool b -> (
-                    match b with
-                    | true -> 1 + poll_for_response tl
-                    | false -> poll_for_response tl)
-                | _ ->
-                    failwith
-                      "Polling for response that isn't a future or bool in map")
-          in
-          VInt (poll_for_response lst)
-      | other ->
-          failwith
-            (Printf.sprintf "Polling for response on %s (not a collection)"
-               (type_name other)))
-  | EPollForAnyResp rhs -> (
-      match eval env rhs with
-      | VList list_ref -> (
-          match !list_ref with
-          | [] -> VBool false
-          | _ ->
-              let rec poll_for_response (lst : value list) : bool =
-                match lst with
-                | [] -> failwith "Polling for response on empty list"
-                | hd :: tl -> (
-                    match hd with
-                    (* | VFuture fut -> (
-                        match !fut with
-                        | Some _ -> true
-                        | None -> poll_for_response tl) *)
-                    | VBool b -> (
-                        match b with
-                        | true -> true
-                        | false -> poll_for_response tl)
-                    | _ ->
-                        failwith
-                          "Polling for response that isn't a future or bool")
-              in
-              VBool (poll_for_response !list_ref))
-      | VMap m ->
-          let folded_map = ValueMap.fold (fun _ v acc -> v :: acc) m [] in
-          let rec poll_for_response (lst : value list) : bool =
-            match lst with
-            | [] -> false
-            | hd :: tl -> (
-                match hd with
-                (* | VFuture fut -> (
-                    match !fut with
-                    | Some _ -> true
-                    | None -> poll_for_response tl) *)
-                | VBool b -> (
-                    match b with true -> true | false -> poll_for_response tl)
-                | _ ->
-                    failwith
-                      "Polling for response that isn't a future or bool in map")
-          in
-          VBool (poll_for_response folded_map)
-      | other ->
-          failwith
-            (Printf.sprintf "Polling for response on %s (not a collection)"
-               (type_name other)))
-  | ENextResp e ->
-      let m = expect_map (eval env e) in
-      let folded_map = ValueMap.fold (fun k v acc -> (k, v) :: acc) m [] in
-      let rec nxt_resp (lst : (value * value) list) : value =
-        match lst with
-        | [] -> failwith "No responses in map"
-        | hd :: tl -> (
-            let key, value = hd in
-            match value with
-            | VFuture fut -> (
-                match fut.value with
-                | Some v ->
-                    ValueMap.replace m key
-                      (VFuture { value = None; waiters = [] });
-                    v
-                | None -> nxt_resp tl)
-            | _ -> failwith "ENextResp on non-future")
-      in
-      nxt_resp folded_map
   | EMin (e1, e2) ->
       VInt (min (expect_int (eval env e1)) (expect_int (eval env e2)))
   | EUnit -> VUnit
@@ -841,6 +750,11 @@ let rec eval (env : record_env) (expr : expr) : value =
       match expect_option (eval env e) with
       | Some v -> v
       | None -> failwith "Runtime error: Attempted to unwrap nil")
+  | EStore (col, key, value) ->
+      let col_val = eval env col in
+      let key_val = eval env key in
+      let val_val = eval env value in
+      update_collection col_val key_val val_val
   | ECoalesce (e_opt, e_default) -> (
       match expect_option (eval env e_opt) with
       | Some v -> v
@@ -850,58 +764,25 @@ let rec eval (env : record_env) (expr : expr) : value =
   | ESome e -> VOption (Some (eval env e))
   | EIntToString e -> VString (string_of_int (expect_int (eval env e)))
 
-let eval_lhs (env : record_env) (lhs : lhs) : lvalue =
-  match lhs with
-  | LVar var -> LVVar var
-  | LAccess (collection, exp) -> (
-      match eval env collection with
-      | VMap map -> LVAccess (eval env exp, map)
-      | VList l -> LVAccessList (eval env exp, l)
-      | other ->
-          failwith
-            (Format.asprintf "LAccess can't index into %s" (type_name other)))
-  | LTuple strs -> LVTuple strs
-
-let store (lhs : lhs) (vl : value) (env : record_env) : unit =
-  match eval_lhs env lhs with
-  | LVVar var ->
+let rec store (l : lhs) (vl : value) (env : record_env) : unit =
+  match l with
+  | LVar var ->
       if Env.mem env.local_env var then Env.replace env.local_env var vl
       else Env.replace env.node_env var vl
-  | LVAccess (key, table) -> ValueMap.replace table key vl
-  | LVAccessList (idx, ref_l) -> (
-      match idx with
-      | VInt i | VNode i ->
-          if i < 0 || i >= List.length !ref_l then
-            failwith "LVAccess idx out of range"
-          else if List.length !ref_l == 0 then failwith "LVAccess empty list"
-          else
-            let lst = !ref_l in
-            ref_l := List.mapi (fun j x -> if j = i then vl else x) lst
-      | other ->
-          Log.err (fun m -> m "failed to index into %s" (to_string_lhs lhs));
-          failwith
-            (Format.asprintf "Can't index into a list with %s" (type_name other))
-      )
-  | LVTuple _ -> failwith "how to store LVTuples?"
+  | LTuple vars -> (
+      match vl with
+      | VTuple vals ->
+          if List.length vars <> Array.length vals then
+            failwith "Tuple assignment mismatch"
+          else List.iteri (fun i var -> store (LVar var) vals.(i) env) vars
+      | _ -> failwith "Cannot assign non-tuple to tuple lhs")
 
 exception Halt
 exception SyncReturn of value
 
 let copy (lhs : lhs) (vl : value) (env : record_env) : unit =
-  match eval_lhs env lhs with
-  | LVVar var -> (
-      match vl with
-      | VMap m ->
-          let temp = ValueMap.copy m in
-          Env.replace env.local_env var (VMap temp)
-      | VList l ->
-          let temp = ref (List.map (fun x -> x) !l) in
-          Env.replace env.local_env var (VList temp)
-      | other ->
-          failwith
-            (Format.asprintf "Cannot copy %s (only collections can be copied)"
-               (type_name other)))
-  | _ -> failwith "copying only to local_copy"
+  (* Since values are immutable, copy is just assignment *)
+  store lhs vl env
 
 let function_info name program =
   try Env.find program.rpc name
@@ -1005,8 +886,6 @@ let rec exec_sync (state : state) (program : program) (env : record_env)
               let promise_val =
                 match lhs with
                 | LVar var -> load var env
-                | LAccess (collection, key) ->
-                    eval env (EFind (collection, key))
                 | LTuple _ ->
                     failwith
                       ("Runtime error: Cannot resolve a tuple at "
@@ -1041,27 +920,23 @@ let rec exec_sync (state : state) (program : program) (env : record_env)
           current_pc := next
       | Break target_vertex -> current_pc := target_vertex
       | ForLoopIn (lhs, expr, body, next) -> (
+          (* 1. Ensure we are iterating over a variable so we can update it *)
+          let var_name =
+            match expr with
+            | EVar name -> name
+            | _ -> failwith "ForLoopIn expression must be a variable"
+          in
+
           match eval env expr with
           | VMap map -> (
-              if ValueMap.length map == 0 then current_pc := next
+              if ValueMap.is_empty map then current_pc := next
               else
-                let single_pair =
-                  let result_ref = ref None in
+                let k, v = ValueMap.min_binding map in
+                let new_map = ValueMap.remove k map in
 
-                  ValueMap.iter
-                    (fun key value ->
-                      match !result_ref with
-                      | Some _ -> ()
-                      | None -> result_ref := Some (key, value))
-                    map;
-                  !result_ref
-                in
-                ValueMap.remove map (fst (Option.get single_pair));
-                store (LVar "local_copy") (VMap map) env;
-
+                store (LVar var_name) (VMap new_map) env;
                 match lhs with
                 | LTuple [ key; value ] ->
-                    let k, v = Option.get single_pair in
                     Env.add env.local_env key k;
                     Env.add env.local_env value v;
                     current_pc := body
@@ -1072,34 +947,23 @@ let rec exec_sync (state : state) (program : program) (env : record_env)
                     failwith
                       "Cannot iterate through map with anything other than a \
                        2-tuple")
-          | VList list_ref -> (
-              if List.length !list_ref == 0 then current_pc := next
-              else
-                let removed_item =
-                  let result_ref = ref None in
-                  List.iter
-                    (fun item ->
-                      match !result_ref with
-                      | Some _ -> ()
-                      | None -> result_ref := Some item)
-                    !list_ref;
+          | VList list -> (
+              match list with
+              | [] -> current_pc := next
+              | item :: rest -> (
+                  store (LVar var_name) (VList rest) env;
 
-                  !result_ref
-                in
-                list_ref :=
-                  List.filter (fun x -> x <> Option.get removed_item) !list_ref;
-                store (LVar "local_copy") (VList list_ref) env;
-                match lhs with
-                | LVar var ->
-                    Env.add env.local_env var (Option.get removed_item);
-                    current_pc := body
-                | _ ->
-                    Log.err (fun m ->
-                        m "failed to iterate list with lhs %s"
-                          (to_string_lhs lhs));
-                    failwith
-                      "Cannot iterate through list with anything other than a \
-                       single variable")
+                  match lhs with
+                  | LVar var ->
+                      Env.add env.local_env var item;
+                      current_pc := body
+                  | _ ->
+                      Log.err (fun m ->
+                          m "failed to iterate list with lhs %s"
+                            (to_string_lhs lhs));
+                      failwith
+                        "Cannot iterate through list with anything other than \
+                         a single variable"))
           | other ->
               Log.err (fun m ->
                   m "failed to iterate collection: %s" (to_string_expr expr));
@@ -1232,7 +1096,6 @@ let exec (state : state) (program : program) (record : record) =
             let promise_val =
               match lhs with
               | LVar var -> load var env
-              | LAccess (collection, key) -> eval env (EFind (collection, key))
               | LTuple _ ->
                   failwith
                     ("Runtime error: Cannot resolve a tuple at "
@@ -1315,32 +1178,26 @@ let exec (state : state) (program : program) (record : record) =
         record.pc <- next;
         DA.add state.runnable_records record
     | ForLoopIn (lhs, expr, body, next) -> (
-        match eval env expr with
+        let var_name =
+          match expr with
+          | EVar name -> name
+          | _ -> failwith "ForLoopIn expression must be a variable"
+        in
+        let collection = eval env expr in
+        match collection with
         | VMap map -> (
-            if
-              (* First remove the pair being processed from the map. *)
-              ValueMap.length map == 0
-            then (
+            if ValueMap.is_empty map then (
               record.pc <- next;
               loop ())
             else
-              let single_pair =
-                let result_ref = ref None in
+              (* Optimization: Direct access via min_binding *)
+              let k, v = ValueMap.min_binding map in
+              let new_map = ValueMap.remove k map in
 
-                ValueMap.iter
-                  (fun key value ->
-                    match !result_ref with
-                    | Some _ -> () (* We already found a pair, so do nothing *)
-                    | None -> result_ref := Some (key, value))
-                  map;
-                !result_ref
-              in
-              ValueMap.remove map (fst (Option.get single_pair));
-              store (LVar "local_copy") (VMap map) env;
+              store (LVar var_name) (VMap new_map) env;
 
               match lhs with
               | LTuple [ key; value ] ->
-                  let k, v = Option.get single_pair in
                   Env.add env.local_env key k;
                   Env.add env.local_env value v;
                   record.pc <- body;
@@ -1351,39 +1208,26 @@ let exec (state : state) (program : program) (record : record) =
                   failwith
                     "Cannot iterate through map with anything other than a \
                      2-tuple")
-        | VList list_ref -> (
-            if
-              (* First remove the pair being processed from the map. *)
-              List.length !list_ref == 0
-            then (
-              record.pc <- next;
-              loop ())
-            else
-              let removed_item =
-                let result_ref = ref None in
-                List.iter
-                  (fun item ->
-                    match !result_ref with
-                    | Some _ -> () (* We already found an item, so do nothing *)
-                    | None -> result_ref := Some item)
-                  !list_ref;
-
-                !result_ref
-              in
-              list_ref :=
-                List.filter (fun x -> x <> Option.get removed_item) !list_ref;
-              store (LVar "local_copy") (VList list_ref) env;
-              match lhs with
-              | LVar var ->
-                  Env.add env.local_env var (Option.get removed_item);
-                  record.pc <- body;
-                  loop ()
-              | _ ->
-                  Log.err (fun m ->
-                      m "failed to iterate list with lhs %s" (to_string_lhs lhs));
-                  failwith
-                    "Cannot iterate through list with anything other than a \
-                     single variable")
+        | VList list -> (
+            match list with
+            | [] ->
+                record.pc <- next;
+                loop ()
+            | removed_item :: new_list -> (
+                (* Optimization: split list into head and tail *)
+                store (LVar var_name) (VList new_list) env;
+                match lhs with
+                | LVar var ->
+                    Env.add env.local_env var removed_item;
+                    record.pc <- body;
+                    loop ()
+                | _ ->
+                    Log.err (fun m ->
+                        m "failed to iterate list with lhs %s"
+                          (to_string_lhs lhs));
+                    failwith
+                      "Cannot iterate through list with anything other than a \
+                       single variable"))
         | other ->
             Log.err (fun m ->
                 m "failed to iterate collection: %s" (to_string_expr expr));

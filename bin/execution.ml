@@ -56,7 +56,7 @@ let recover_node_in_topology (topology : topology_info) (state : state)
       | "FULL" ->
           [
             VInt node_id;
-            VList (ref (List.init topology.num_servers (fun j -> VNode j)));
+            VList (List.init topology.num_servers (fun j -> VNode j));
           ]
       | _ -> failwith "Recovery not implemented for this topology"
     in
