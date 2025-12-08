@@ -72,7 +72,7 @@ role Node {
     
     func Init(me: int, peers: list<Node>) {
         self = me;
-        for (var i: int = 0; i < len(peers); i = i + 1) {
+        for var i: int = 0; i < len(peers); i = i + 1 {
             replicas = append(replicas, peers[i]);
         }
     }
@@ -80,7 +80,7 @@ role Node {
     func RecoverInit(me: int, peers: list<Node>) {
         status = 2;
         self = me;
-        for (var i: int = 0; i < len(peers); i = i + 1) {
+        for var i: int = 0; i < len(peers); i = i + 1 {
           replicas = append(replicas, peers[i]);
         }
 
@@ -92,9 +92,9 @@ role Node {
 
         var checkpoint_op: int = applied_op_count;
 
-        for (var i: int = 0; i < len(replicas); i = i + 1) {
+        for var i: int = 0; i < len(replicas); i = i + 1 {
             if (i != self) {
-                rpc_call(replicas[i], Recovery(replicas[self], recovery_nonce, checkpoint_op));
+                replicas[i]->Recovery(replicas[self], recovery_nonce, checkpoint_op);
             }
         }
     }
@@ -111,16 +111,16 @@ role Node {
 
     // Applies committed entries to the KV store
     sync func apply_committed_entries() {
-        for (; applied_op_count < commit_number and applied_op_count < len(log) ;) {
+        for ; applied_op_count < commit_number and applied_op_count < len(log) ; {
             var i: int = applied_op_count;
-            var op_n: int = i + 1; 
+            var op_n: int = i + 1;
             var entry: LogEntry = log[i];
             var cmd: Command = entry.op;
-            
+
             var result: string? = nil;
 
             if (cmd.kind == 1) { // Write
-                kv_store = store(kv_store, cmd.key, cmd.value!);
+                kv_store = kv_store[cmd.key] := cmd.value!;
             } elseif (cmd.kind == 0) { // Read
                 if (exists(kv_store, cmd.key)) {
                     result = kv_store[cmd.key];
@@ -134,15 +134,15 @@ role Node {
             if (exists(pending_requests, op_n)) {
                 // Resolve with a success status, the read result, and self as primary.
                 var resp: ClientResponse = ClientResponse{
-                    is_primary: true, 
+                    is_primary: true,
                     key: cmd.key,
-                    value: result, 
+                    value: result,
                     primary: replicas[self]
                 };
                 resolve_promise(pending_requests[op_n], resp);
                 pending_requests = erase(pending_requests, op_n);
             }
-            
+
             applied_op_count = applied_op_count + 1;
         }
     }
@@ -152,23 +152,23 @@ role Node {
         if (status != 0) { return (); }
         if (other_op_number <= op_number) { return (); }
         if (!exists(prepare_buffer, other_op_number)) {
-            prepare_buffer = store(prepare_buffer, other_op_number, PrepareMsg {
+            prepare_buffer = prepare_buffer[other_op_number] := PrepareMsg {
                 request: other_request,
                 commit_number: other_commit_number
-            });
+            };
         }
-        for (; exists(prepare_buffer, op_number + 1); ) {
+        for ; exists(prepare_buffer, op_number + 1); {
             var next_op: int = op_number + 1;
             var msg: PrepareMsg = prepare_buffer[next_op];
-            // process_entry(next_op, msg);  
-            
+            // process_entry(next_op, msg);
+
             op_number = next_op;
             log = append(log, LogEntry{ view: view_number, op: msg.request });
             if (msg.commit_number > commit_number) {
                 commit_number = msg.commit_number;
                 apply_committed_entries();
             }
-            rpc_call(primary_of(view_number), PrepareOK(view_number, op_number, replicas[self]));
+            primary_of(view_number)->PrepareOK(view_number, op_number, replicas[self]);
 
             prepare_buffer = erase(prepare_buffer, next_op);
         }
@@ -178,16 +178,16 @@ role Node {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] == current_primary and other_view == view_number and status == 0) {
             if (!exists(prepare_ok_counts, other_op_number)) {
-                prepare_ok_counts = store(prepare_ok_counts, other_op_number, 0);
+                prepare_ok_counts = prepare_ok_counts[other_op_number] := 0;
             }
-            prepare_ok_counts = store(prepare_ok_counts, other_op_number, prepare_ok_counts[other_op_number] + 1);
+            prepare_ok_counts = prepare_ok_counts[other_op_number] := prepare_ok_counts[other_op_number] + 1;
             var quorum: int = f() + 1;
             if (prepare_ok_counts[other_op_number] >= quorum and other_op_number > commit_number) {
                 commit_number = other_op_number;
                 apply_committed_entries();
-                for (var i: int = 0; i < len(replicas); i = i + 1) {
+                for var i: int = 0; i < len(replicas); i = i + 1 {
                     if (i != self) {
-                        @rpc_call(replicas[i], Commit(view_number, commit_number));
+                        @replicas[i]->Commit(view_number, commit_number);
                     }
                 }
             }
@@ -212,13 +212,13 @@ role Node {
             primary: new_primary 
         };
 
-        for ((op_n, p) in pending_requests) {
+        for (op_n, p) in pending_requests {
             resolve_promise(p, resp);
         }
         pending_requests = {};
         
         start_view_change_senders = {};
-        start_view_change_senders = store(start_view_change_senders, replicas[self], true); 
+        start_view_change_senders = start_view_change_senders[replicas[self]] := true; 
         
         do_view_change_senders = {};
         do_view_change_messages = [];
@@ -249,7 +249,7 @@ role Node {
             value: nil,
             primary: new_primary 
         };
-        for ((op_n, p) in pending_requests) {
+        for (op_n, p) in pending_requests {
             resolve_promise(p, resp);
         }
         pending_requests = {}; 
@@ -264,16 +264,16 @@ role Node {
 
         if (new_view > view_number) {
             enter_view_change(new_view);
-            for (var i: int = 0; i < len(replicas); i = i + 1) {
+            for var i: int = 0; i < len(replicas); i = i + 1 {
                 if (i != self) {
-                    rpc_call(replicas[i], StartViewChange(view_number, replicas[self]));
+                    replicas[i]->StartViewChange(view_number, replicas[self]);
                 }
             }
         } elseif (new_view == view_number and status == 1) {
             if (exists(start_view_change_senders, replica_id)) {
                 return (); // Already have a message from this sender
             }
-            start_view_change_senders = store(start_view_change_senders, replica_id, true);
+            start_view_change_senders = start_view_change_senders[replica_id] := true;
             
             var f_val: int = (len(replicas) - 1) / 2;
             var quorum: int = f_val + 1;
@@ -282,7 +282,7 @@ role Node {
                 var new_primary: Node = primary_of(view_number);
                 
                 // Pass our own ID (replicas[self]) as the sender
-                rpc_call(new_primary, DoViewChange(view_number, log, normal_view, op_number, commit_number, replicas[self]));
+                new_primary->DoViewChange(view_number, log, normal_view, op_number, commit_number, replicas[self]);
             }
         }
     }
@@ -295,7 +295,7 @@ role Node {
             if (exists(do_view_change_senders, sender_id)) {
                 return ();
             }
-            do_view_change_senders = store(do_view_change_senders, sender_id, true);
+            do_view_change_senders = do_view_change_senders[sender_id] := true;
             
             do_view_change_messages = append(do_view_change_messages, DoViewChangeMsg{
                 log: sender_log,
@@ -314,7 +314,7 @@ role Node {
                 var best_op_number: int = first_msg.op_number;
                 var max_commit_number: int = first_msg.commit_number;
 
-                for (var i: int = 1; i < len(do_view_change_messages); i = i + 1) { // Start from 1
+                for var i: int = 1; i < len(do_view_change_messages); i = i + 1 { // Start from 1
                     var msg: DoViewChangeMsg = do_view_change_messages[i];
                     if (msg.normal_view > best_normal_view) {
                         best_normal_view = msg.normal_view;
@@ -329,8 +329,8 @@ role Node {
                     }
                 }
                 enter_normal_mode(new_view, best_log, best_op_number, max_commit_number);
-                for (var i: int = 0; i < len(replicas); i = i + 1) {
-                    rpc_call(replicas[i], StartView(view_number, log, op_number, commit_number));
+                for var i = 0; i < len(replicas); i = i + 1 {
+                    replicas[i]->StartView(view_number, log, op_number, commit_number);
                 }
             }
         }
@@ -344,8 +344,8 @@ role Node {
             enter_normal_mode(new_view, new_log, new_op_number, new_commit_number);
             var new_primary: Node = primary_of(view_number);
             if (replicas[self] != new_primary) {
-                for (var i: int = commit_number + 1; i <= op_number; i = i + 1) {
-                    rpc_call(new_primary, PrepareOK(view_number, i, replicas[self]));
+                for var i = commit_number + 1; i <= op_number; i = i + 1 {
+                    new_primary->PrepareOK(view_number, i, replicas[self]);
                 }
             }
         }
@@ -364,16 +364,16 @@ role Node {
 
             // Find the log suffix after the recovering node's last checkpoint
             var log_suffix: list<LogEntry> = [];
-            for (var i: int = checkpoint_op; i < len(log); i = i + 1) {
+            for var i = checkpoint_op; i < len(log); i = i + 1 {
                 log_suffix = append(log_suffix, log[i]);
             }
 
             // Send the response with the log and current numbers
-            rpc_call(replica_id, RecoveryResponse(view_number, nonce, log_suffix, op_number, commit_number, replicas[self]));
+            replica_id->RecoveryResponse(view_number, nonce, log_suffix, op_number, commit_number, replicas[self]);
 
         } else {
             // This node is a backup. Send a response with nil state.
-            rpc_call(replica_id, RecoveryResponse(view_number, nonce, nil, nil, nil, replicas[self]));
+            replica_id->RecoveryResponse(view_number, nonce, nil, nil, nil, replicas[self]);
         }
     }
 
@@ -391,7 +391,7 @@ role Node {
         }
 
         // Store the response
-        recovery_response_senders = store(recovery_response_senders, sender_id, true);
+        recovery_response_senders = recovery_response_senders[sender_id] := true;
         recovery_responses = append(recovery_responses, RecoveryResponseMsg {
             view: other_view,
             nonce: other_nonce,
@@ -410,7 +410,7 @@ role Node {
 
         // 1. Find the latest view number seen in the responses
         var latest_view: int = -1;
-        for (var i: int = 0; i < len(recovery_responses); i = i + 1) {
+        for var i = 0; i < len(recovery_responses); i = i + 1 {
             if (recovery_responses[i].view > latest_view) {
                 latest_view = recovery_responses[i].view;
             }
@@ -423,7 +423,7 @@ role Node {
         var latest_view_primary: Node = primary_of(latest_view);
 
         var primary_resp: RecoveryResponseMsg? = nil;
-        for (var i: int = 0; i < len(recovery_responses); i = i + 1) {
+        for var i = 0; i < len(recovery_responses); i = i + 1 {
             var resp: RecoveryResponseMsg = recovery_responses[i];
             if (resp.view == latest_view and resp.sender == latest_view_primary) {
                 primary_resp = resp;
@@ -449,12 +449,12 @@ role Node {
 
         // Reconstruct the log: our local prefix + primary's suffix
         var new_log: list<LogEntry> = [];
-        for (var i: int = 0; i < applied_op_count; i = i + 1) {
+        for var i = 0; i < applied_op_count; i = i + 1 {
             new_log = append(new_log, log[i]);
         }
         // Append the suffix from the primary
         var log_suffix: list<LogEntry> = p_resp.log!;
-        for (var i: int = 0; i < len(log_suffix); i = i + 1) {
+        for var i = 0; i < len(log_suffix); i = i + 1 {
             new_log = append(new_log, log_suffix[i]);
         }
         log = new_log;
@@ -469,8 +469,8 @@ role Node {
         // Send PrepareOK for non-committed ops to new primary
         var new_primary: Node = primary_of(view_number);
         if (replicas[self] != new_primary) {
-            for (var i: int = commit_number + 1; i <= op_number; i = i + 1) {
-                rpc_call(new_primary, PrepareOK(view_number, i, replicas[self]));
+            for var i = commit_number + 1; i <= op_number; i = i + 1 {
+                new_primary->PrepareOK(view_number, i, replicas[self]);
             }
         }
     }
@@ -504,20 +504,20 @@ role Node {
 
         op_number = op_number + 1;
         log = append(log, LogEntry{view: view_number, op: cmd});
-        prepare_ok_counts = store(prepare_ok_counts, op_number, 0);
+        prepare_ok_counts = prepare_ok_counts[op_number] := 0;
 
         // Create a promise for the client to await commitment
         var p: promise<ClientResponse> = create_promise();
-        pending_requests = store(pending_requests, op_number, p);
+        pending_requests = pending_requests[op_number] := p;
 
         if (len(replicas) == 1) {
             commit_number = op_number;
             apply_committed_entries(); // This will resolve the promise
         } else {
-             for (var i: int = 0; i < len(replicas); i = i + 1) {
+             for var i = 0; i < len(replicas); i = i + 1 {
                 if (i != self) {
                     // Replicate the command
-                    rpc_call(replicas[i], Prepare(view_number, cmd, op_number, commit_number));
+                    replicas[i]->Prepare(view_number, cmd, op_number, commit_number);
                 }
             }
         }
@@ -548,9 +548,9 @@ role Node {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) { 
             enter_view_change(view_number + 1);
-            for (var i: int = 0; i < len(replicas); i = i + 1) {
+            for var i = 0; i < len(replicas); i = i + 1 {
                  if (i != self) {
-                    rpc_call(replicas[i], StartViewChange(view_number, replicas[self]));
+                    replicas[i]->StartViewChange(view_number, replicas[self]);
                  }
             }
         }
@@ -568,9 +568,9 @@ ClientInterface {
     func Write(dest: Node, key: string, value: string) {
         var current_target: Node = dest;
 
-        for (;;) {
-            var resp: ClientResponse = @rpc_call(current_target, Write(key, value));
-            
+        for ;; {
+            var resp: ClientResponse = @current_target->Write(key, value);
+
             if (resp.is_primary == true) {
                 responses = append(responses, (resp, key));
                 return ();
@@ -583,8 +583,8 @@ ClientInterface {
     func Read(dest: Node, key: string) -> string? {
         var current_target: Node = dest;
 
-        for (;;) {
-            var resp: ClientResponse = @rpc_call(current_target, Read(key));
+        for ;; {
+            var resp: ClientResponse = @current_target->Read(key);
 
             if (resp.is_primary == true) {
                 return resp.value;
@@ -597,11 +597,11 @@ ClientInterface {
 
     // Gets the entire KV store from a replica (for debugging/testing).
     func GetKVStore(dest: Node) -> map<string, string> {
-        return @rpc_call(dest, GetKVStore());
+        return @dest->GetKVStore();
     }
 
     // Triggers a simulated timeout at the destination node.
     func SimulateTimeout(dest: Node) {
-        rpc_call(dest, SimulateTimeout());
+        dest->SimulateTimeout();
     }
 }
