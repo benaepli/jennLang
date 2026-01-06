@@ -9,3 +9,4 @@ output*.log
 .DS_Store
 output*.html
 output/
+output.db
