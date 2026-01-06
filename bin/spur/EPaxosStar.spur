@@ -31,6 +31,17 @@ type AcceptOKRequest {
     id: int;
 };
 
+type RecoverResponse {
+    ballot: int;
+    id: int;
+    acceptedBallot: int;
+    payload: Payload;
+    dependencies: DependencySet;
+    initialDependencies: DependencySet;
+    phase: int;
+    sender: Node;
+}
+
 type CommitRequest = AcceptRequest;
 
 type Command {
@@ -46,6 +57,7 @@ type Command {
     preAcceptResponses: list<PreAcceptOKRequest>;
     preAcceptQuorumMet: bool;
     acceptResponses: list<AcceptOKRequest>;
+    recoverResponses: list<RecoverResponse>;
 };
 
 
@@ -70,14 +82,27 @@ role Node {
     var t_low: map<int, int> = {};
     var t_sccs: list<list<int>> = [];
 
+    var kv_store: map<string, string> = {};
+    var pending: map<int, chan<string?>> = {};
+
+    var cmd_seq: int = 0;
+    var node_count: int = 0;
 
     func Init(me: int, all: list<Node>) {
         self = me;
         replicas = all;
+        node_count = len(replicas);
 
         var n: int = len(replicas);
         f = (n - 1) / 2;
         e = (n - f + 1) / 2;
+    }
+    
+    sync func newId() -> int {
+        // Simple stride strategy to ensure unique IDs across nodes
+        var id: int = (cmd_seq * node_count) + self;
+        cmd_seq = cmd_seq + 1;
+        return id;
     }
 
     sync func fastQuorum() -> int {
@@ -97,6 +122,14 @@ role Node {
             }
         }
         return result;
+    }
+
+    sync func conflicts(c1: Payload, c2: Payload) -> bool {
+        // Nop (kind 2) conflicts with everything
+        if (c1.kind == 2 or c2.kind == 2) {
+            return true;
+        }
+        return (c1.kind != 0 or c2.kind != 0) and (c1.key == c2.key);
     }
 
     sync func union(fst: DependencySet, snd: DependencySet) -> DependencySet {
@@ -166,8 +199,11 @@ role Node {
             preAcceptResponses: [],
             preAcceptQuorumMet: false,
             acceptResponses: [],
+            recoverResponses: [],
         };
         commands = commands[request.id] := cmd;
+
+        startRecoveryTimer(request.id);
 
         request.sender->PreAcceptOK(
             PreAcceptOKRequest{
@@ -270,6 +306,7 @@ role Node {
             preAcceptResponses: [],
             preAcceptQuorumMet: false,
             acceptResponses: [],
+            recoverResponses: [],
         };
         request.sender->AcceptOK(
             AcceptOKRequest{
@@ -324,6 +361,7 @@ role Node {
             preAcceptResponses: [],
             preAcceptQuorumMet: false,
             acceptResponses: [],
+            recoverResponses: [],
         };
 
         TryExecute();
@@ -487,12 +525,26 @@ role Node {
         return ids;
     }
 
-    sync func executeCommand(payload: Payload) {
+    func executeCommand(id: int, payload: Payload) {
         if (payload.kind == 2) {
              return ();
         }
 
-        // TODO: actually execute command.
+        var result: string? = nil;
+        if (payload.kind == 1) { // Write
+             kv_store = kv_store[payload.key] := payload.value!;
+             result = payload.value;
+        } else if (payload.kind == 0) { // Read
+             if (exists(kv_store, payload.key)) {
+                 result = kv_store[payload.key];
+             }
+        }
+
+        // Notify waiting (if this node submitted the command)
+        if (exists(pending, id)) {
+            send(pending[id], result);
+            pending = erase(pending, id);
+        }
     }
 
     func TryExecute() {
@@ -508,24 +560,309 @@ role Node {
                 var isNop: bool = (cmd.payload.kind == 2);
 
                 if (!exists(executed, id) and !isNop) {
-                    executeCommand(cmd.payload);
+                    executeCommand(id, cmd.payload);
                     executed = executed[id] := true;
                 }
                 if (!exists(executed, id) and isNop) {
+                    executeCommand(id, cmd.payload);
                     executed = executed[id] := true;
                 }
             }
         }
     }
+
+    func startRecoveryTimer(id: int) {
+        var timeout_ch: chan<()> = set_timer();
+        <- timeout_ch;
+        CheckAndTriggerRecovery(id);
+    }
+
+    sync func leader_detector(id: int) -> Node {
+        var n: int = len(replicas);
+        return replicas[id % n];
+    }
+
+    sync func CheckAndTriggerRecovery(id: int) {
+        if exists(commands, id) and commands[id].phase != 3 {
+            var leader: Node = leader_detector(id);
+            if (leader == replicas[self]) {
+                recover(id);
+            } else {
+                leader->TryRecover(id); 
+            }
+        }
+    }
+
+    func TryRecover(id: int) {
+        if (replicas[self] == leader_detector(id)) {
+            recover(id);
+        }
+    }
+
+    // Figure 5 of EPaxos*
+    sync func recover(id: int) {
+        // Pick a higher ballot number to take over
+        var current_bal: int = 0;
+        if (exists(commands, id)) {
+            current_bal = commands[id].ballot;
+        }
+        var new_ballot: int = current_bal + 1; 
+
+        for node in replicas {
+            node->HandleRecover(new_ballot, id, replicas[self]);
+        }
+    }
+
+    sync func depsEqual(d1: DependencySet, d2: DependencySet) -> bool {
+        if (len(d1) != len(d2)) {
+            return false;
+        }
+        for (id, _) in d1 {
+            if (!exists(d2, id)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    sync func anyInU(U: list<RecoverResponse>, phase: int) -> bool {
+        for r in U {
+            if (r.phase == phase) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    sync func getOneInU(U: list<RecoverResponse>, phase: int) -> RecoverResponse {
+        for r in U {
+            if (r.phase == phase) {
+                return r;
+            }
+        }
+        // This should not be reached if anyInU was called first
+        return U[0];
+    }
+
+    func BroadcastCommit(b: int, id: int, c: Payload, D: DependencySet) {
+        var req: CommitRequest = CommitRequest{
+            sender: replicas[self],
+            ballot: b,
+            id: id,
+            payload: c,
+            dependencies: D,
+        };
+        for node in replicas {
+            node->Commit(req);
+        }
+    }
+
+    func BroadcastAccept(b: int, id: int, c: Payload, D: DependencySet) {
+        var req: AcceptRequest = AcceptRequest{
+            sender: replicas[self],
+            ballot: b,
+            id: id,
+            payload: c,
+            dependencies: D,
+        };
+        for node in replicas {
+            node->Accept(req);
+        }
+    }
+
+    // Figure 5
+    func HandleRecover(b: int, id: int, q: Node) {
+        if (!exists(commands, id) or commands[id].ballot < b) {
+            if (!exists(commands, id)) {
+                commands = commands[id] := Command{
+                    payload: Payload{kind: 2, key: "", value: nil}, // Default to Nop
+                    phase: 0,          
+                    dependencies: {},      
+                    ballot: b,             // Adopt the recovery ballot 
+                    acceptedBallot: 0,
+                    initialPayload: Payload{kind: 2, key: "", value: nil},
+                    initialDependencies: {},
+                    leader: q,             // The node currently trying to recover it
+                    preAcceptResponses: [],
+                    preAcceptQuorumMet: false,
+                    acceptResponses: [],
+                    recoverResponses: []
+                };
+            } else {
+                var cmd: Command = commands[id];
+                cmd = cmd.ballot := b;
+                commands = commands[id] := cmd;
+            }
+
+            var cmd: Command = commands[id];
+            q->HandleRecoverOK(RecoverResponse{
+                ballot: b,
+                id: id,
+                acceptedBallot: cmd.acceptedBallot,
+                payload: cmd.payload,
+                dependencies: cmd.dependencies,
+                initialDependencies: cmd.initialDependencies,
+                phase: cmd.phase,
+                sender: replicas[self],
+            });
+        }
+    }
+
+    // Figure 5
+    func HandleRecoverOK(request: RecoverResponse) {
+        if (!exists(commands, request.id)) {
+            return ();
+        }
+        var cmd: Command = commands[request.id];
+        if (cmd.ballot != request.ballot) {
+            return ();
+        }
+
+        append(cmd.recoverResponses, request);
+
+        if (len(cmd.recoverResponses) >= slowQuorum()) {
+            var b_max: int = -1;
+            for r in cmd.recoverResponses {
+                if (r.acceptedBallot > b_max) {
+                    b_max = r.acceptedBallot;
+                }
+            }
+
+            // Filter for processes at that highest ballot
+            var U: list<RecoverResponse> = [];
+            for r in cmd.recoverResponses { 
+                if (r.acceptedBallot == b_max) {
+                    append(U, r); 
+                } 
+            }
+
+            var b: int = cmd.ballot;
+            var id: int = request.id;
+
+            if (anyInU(U, 3)) { 
+                var res: RecoverResponse = getOneInU(U, 3);
+                BroadcastCommit(b, id, res.payload, res.dependencies);
+            } else if (anyInU(U, 2)) {
+                var res: RecoverResponse = getOneInU(U, 2);
+                BroadcastAccept(b, id, res.payload, res.dependencies);
+            } else {
+                // Check for potential Fast Path recovery
+                var R: list<RecoverResponse> = [];
+                for r in cmd.recoverResponses {
+                    if (r.phase == 1 and depsEqual(r.dependencies, r.initialDependencies)) { 
+                        append(R, r); 
+                    }
+                }
+                if (len(R) >= (len(replicas) - e)) { // Potential fast path
+                    StartValidation(b, id, R[0].payload, R[0].dependencies);
+                } else {
+                    // No progress found; propose Nop to clear the slot
+                    BroadcastAccept(b, id, Payload{kind: 2, key: "", value: nil}, {});
+                }
+            }
+        }
+    }
+
+    func StartValidation(b: int, id: int, c: Payload, D: DependencySet) {
+        for node in replicas {
+            node->HandleValidate(b, id, c, D, replicas[self]);
+        }
+    }
+
+    func HandleValidate(b: int, id: int, c: Payload, D: DependencySet, q: Node) {
+        if (commands[id].ballot == b) {
+            // Collect local "invalidating" commands.
+            var I: list<int> = findLocalInvalidators(id, c, D);
+            q->HandleValidateOK(b, id, I);
+        }
+    }
+
+    sync func findLocalInvalidators(id: int, c: Payload, D: DependencySet) -> list<int> {
+        var I: list<int> = [];
+
+        for (id_prime, cmd_prime) in commands {
+            // Skip comparing a command to itself
+            if (id_prime != id) {
+                // Definition 7: Invalidating Commands
+                // 1. Committed
+                // 2. Payload conflicts with proposed payload 
+                // 3. Proposed D doesn't include id_prime
+                // 4. The other command's D doesn't include our id 
+                if (cmd_prime.phase == 3) {
+                    if (conflicts(c, cmd_prime.payload) and 
+                        !exists(D, id_prime) and 
+                        !exists(cmd_prime.dependencies, id)) {
+                        
+                        append(I, id_prime); 
+                    }
+                } 
+                
+                // Definition 8: Potentially Invalidating Commands 
+                // These are commands not yet committed but could eventually invalidate id.
+                else if (cmd_prime.phase != 0) {
+                    // Use initial payloads and dependencies for checking 
+                    if (conflicts(c, cmd_prime.initialPayload) and 
+                        !exists(D, id_prime) and 
+                        !exists(cmd_prime.initialDependencies, id)) {
+                        
+                        append(I, id_prime); 
+                    }
+                }
+            }
+        }
+        return I;
+    }
+
+    func HandleValidateOK(b: int, id: int, I_from_q: list<int>) {
+        // var I_total: list<int> = computeUnion(collected_validations);
+        // if (len(I_total) == 0) {
+        //     // Safe to recover with proposed values 
+        //     BroadcastAccept(b, id, recovered_payload, recovered_deps); 
+        // } else {
+        //     // Check if any in I_total are already committed [
+        //     if (anyCommittedInvalidator(I_total)) {
+        //         // Must abort and propose Nop to maintain consistency
+        //         BroadcastAccept(b, id, Payload{kind: 2}, {});
+        //     } else {
+        //         // All are uncommitted; must wait for them to resolve 
+        //         // Trigger the "Waiting" mechanism to prevent deadlocks 
+        //         StartWaitingMechanism(id, I_total);
+        //     }
+        // }
+    }
+
+
+    func ClientWrite(key: string, value: string) -> chan<string?> {
+        var id: int = newId();
+        var p: chan<string?> = make(1);
+        pending = pending[id] := p;
+        
+        var payload: Payload = Payload{kind: 1, key: key, value: value};
+        Submit(payload, id);
+        
+        return p;
+    }
+
+    func ClientRead(key: string) -> chan<string?> {
+        var id: int = newId();
+        var p: chan<string?> = make(1);
+        pending = pending[id] := p;
+        
+        var payload: Payload = Payload{kind: 0, key: key, value: nil};
+        Submit(payload, id);
+        
+        return p;
+    }
 }
 
 ClientInterface {
     func Read(dest: Node, key: string) -> string? {
-        // TODO: Implement
-        return nil;
+        var promise: chan<string?> = <-dest->ClientRead(key);
+        return <-promise;
     }
 
     func Write(dest: Node, key: string, value: string) {
-        // TODO: Implement
+        var promise: chan<string?> = <-dest->ClientWrite(key, value);
+        <-promise;
     }
 }
