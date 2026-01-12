@@ -70,14 +70,14 @@ role Node {
     var recovery_responses: list<RecoveryResponseMsg> = [];
     var recovery_response_senders: map<Node, bool> = {};
     
-    func Init(me: int, peers: list<Node>) {
+    async func Init(me: int, peers: list<Node>) {
         self = me;
         for var i: int = 0; i < len(peers); i = i + 1 {
             replicas = append(replicas, peers[i]);
         }
     }
 
-    func RecoverInit(me: int, peers: list<Node>) {
+    async func RecoverInit(me: int, peers: list<Node>) {
         status = 2;
         self = me;
         for var i: int = 0; i < len(peers); i = i + 1 {
@@ -99,23 +99,23 @@ role Node {
         }
     }
 
-    // Async helper to resolve channels from sync functions
-    func send_async(ch: chan<ClientResponse>, resp: ClientResponse) {
+    // Async helper to resolve channels from functions
+    async func send_async(ch: chan<ClientResponse>, resp: ClientResponse) {
         send(ch, resp);
     }
 
-    sync func primary_of(v: int) -> Node {
+    func primary_of(v: int) -> Node {
         var num_servers: int = len(replicas);
         return replicas[v % num_servers];
     }
     
-    sync func f() -> int {
+    func f() -> int {
         var num_servers: int = len(replicas);
         return (num_servers - 1) / 2;
     }
 
     // Applies committed entries to the KV store
-    sync func apply_committed_entries() {
+    func apply_committed_entries() {
         for ; applied_op_count < commit_number and applied_op_count < len(log) ; {
             var i: int = applied_op_count;
             var op_n: int = i + 1;
@@ -152,7 +152,7 @@ role Node {
         }
     }
 
-    func Prepare(other_view: int, other_request: Command, other_op_number: int, other_commit_number: int) {
+    async func Prepare(other_view: int, other_request: Command, other_op_number: int, other_commit_number: int) {
         if (other_view != view_number) { return (); }
         if (status != 0) { return (); }
         if (other_op_number <= op_number) { return (); }
@@ -179,7 +179,7 @@ role Node {
         }
     }
 
-    func PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
+    async func PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] == current_primary and other_view == view_number and status == 0) {
             if (!exists(prepare_ok_counts, other_op_number)) {
@@ -198,14 +198,14 @@ role Node {
             }
         }
     }
-    func Commit(other_view: int, other_commit_number: int) {
+    async func Commit(other_view: int, other_commit_number: int) {
         if (other_view == view_number and status == 0 and other_commit_number > commit_number) {
             commit_number = other_commit_number;
             apply_committed_entries();
         }
     }
 
-    sync func enter_view_change(new_view: int) {
+    func enter_view_change(new_view: int) {
         status = 1;
         view_number = new_view;
 
@@ -232,7 +232,7 @@ role Node {
         prepare_buffer = {};
     }
 
-    sync func enter_normal_mode(v: int, new_log: list<LogEntry>, op_n: int, commit_n: int) {
+    func enter_normal_mode(v: int, new_log: list<LogEntry>, op_n: int, commit_n: int) {
         status = 0;
         view_number = v;
         log = new_log;
@@ -262,7 +262,7 @@ role Node {
         apply_committed_entries();
     }
 
-    func StartViewChange(new_view: int, replica_id: Node) {
+    async func StartViewChange(new_view: int, replica_id: Node) {
         if (status == 2) {
             return ();
         }
@@ -292,7 +292,7 @@ role Node {
         }
     }
 
-    func DoViewChange(new_view: int, sender_log: list<LogEntry>, sender_normal_view: int, sender_op_number: int, sender_commit_number: int, sender_id: Node) {
+    async func DoViewChange(new_view: int, sender_log: list<LogEntry>, sender_normal_view: int, sender_op_number: int, sender_commit_number: int, sender_id: Node) {
         var current_primary: Node = primary_of(new_view);
         
         if (replicas[self] == current_primary and new_view == view_number and status == 1) {
@@ -341,7 +341,7 @@ role Node {
         }
     }
 
-    func StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
+    async func StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
         if (status == 2) {
             return ();
         }
@@ -356,7 +356,7 @@ role Node {
         }
     }
 
-    func Recovery(replica_id: Node, nonce: int, checkpoint_op: int) {
+    async func Recovery(replica_id: Node, nonce: int, checkpoint_op: int) {
         // Only respond if status is normal
         if (status != 0) {
             return ();
@@ -382,7 +382,7 @@ role Node {
         }
     }
 
-    func RecoveryResponse(other_view: int, other_nonce: int, other_log: list<LogEntry>?, other_op_number: int?, other_commit_number: int?, sender_id: Node) {
+    async func RecoveryResponse(other_view: int, other_nonce: int, other_log: list<LogEntry>?, other_op_number: int?, other_commit_number: int?, sender_id: Node) {
         if (status != 2) {
             return ();
         }
@@ -481,7 +481,7 @@ role Node {
     }
 
     // Accepts a new command, logs it, and starts the replication process.
-    sync func NewEntry(cmd: Command) -> chan<ClientResponse> {
+    func NewEntry(cmd: Command) -> chan<ClientResponse> {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) {
             // Not the primary. Return a failure/redirect response.
@@ -532,20 +532,20 @@ role Node {
     }
 
     // Accepts a new Write command from a client.
-    func Write(key: string, value: string) -> ClientResponse {
+    async func Write(key: string, value: string) -> ClientResponse {
         var cmd: Command = Command{ kind: 1, key: key, value: value };
         var response: chan<ClientResponse> = NewEntry(cmd);
         return <- response;
     }
 
     // Accepts a new Read command from a client.
-    func Read(key: string) -> ClientResponse {
+    async func Read(key: string) -> ClientResponse {
         // A Read is also a log entry to ensure linearizability
         var cmd: Command = Command{ kind: 0, key: key, value: nil };
         return <- NewEntry(cmd);
     }
     
-    func SimulateTimeout() {
+    async func SimulateTimeout() {
         if (status == 2) { 
             return (); 
         }
@@ -561,7 +561,7 @@ role Node {
         }
     }
 
-    func GetKVStore() -> map<string, string> {
+    async func GetKVStore() -> map<string, string> {
         return kv_store;
     }
 }
@@ -570,7 +570,7 @@ ClientInterface {
     var responses: list<(ClientResponse, string)> = [];
 
     // Sends a new write command to a specific replica, retrying on redirect.
-    func Write(dest: Node, key: string, value: string) {
+    async func Write(dest: Node, key: string, value: string) {
         var current_target: Node = dest;
 
         for ;; {
@@ -585,7 +585,7 @@ ClientInterface {
     }
 
     // Sends a new read command to a specific replica, retrying on redirect.
-    func Read(dest: Node, key: string) -> string? {
+    async func Read(dest: Node, key: string) -> string? {
         var current_target: Node = dest;
 
         for ;; {
@@ -601,12 +601,12 @@ ClientInterface {
     }
 
     // Gets the entire KV store from a replica (for debugging/testing).
-    func GetKVStore(dest: Node) -> map<string, string> {
+    async func GetKVStore(dest: Node) -> map<string, string> {
         return <-dest->GetKVStore();
     }
 
     // Triggers a simulated timeout at the destination node.
-    func SimulateTimeout(dest: Node) {
+    async func SimulateTimeout(dest: Node) {
         dest->SimulateTimeout();
     }
 }

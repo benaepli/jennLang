@@ -93,7 +93,7 @@ role Node {
     var cmd_seq: int = 0;
     var node_count: int = 0;
 
-    func Init(me: int, all: list<Node>) {
+    async func Init(me: int, all: list<Node>) {
         self = me;
         replicas = all;
         node_count = len(replicas);
@@ -105,22 +105,22 @@ role Node {
         println("Initialized node. Node count: " + int_to_string(node_count) + " F: " + int_to_string(f) + " E: " + int_to_string(e));
     }
     
-    sync func newId() -> int {
+    func newId() -> int {
         // Simple stride strategy to ensure unique IDs across nodes
         var id: int = (cmd_seq * node_count) + self;
         cmd_seq = cmd_seq + 1;
         return id;
     }
 
-    sync func fastQuorum() -> int {
+    func fastQuorum() -> int {
         return len(replicas) - e;
     }
 
-    sync func slowQuorum() -> int {
+    func slowQuorum() -> int {
         return len(replicas) - f;
     }
 
-    sync func localConflicts(c: Payload) -> DependencySet {
+    func localConflicts(c: Payload) -> DependencySet {
         var result: DependencySet = {};
         for (id, command) in commands {
             var payload: Payload = command.payload;
@@ -131,7 +131,7 @@ role Node {
         return result;
     }
 
-    sync func conflicts(c1: Payload, c2: Payload) -> bool {
+    func conflicts(c1: Payload, c2: Payload) -> bool {
         // Nop (kind 2) conflicts with everything
         if (c1.kind == 2 or c2.kind == 2) {
             return true;
@@ -139,7 +139,7 @@ role Node {
         return (c1.kind != 0 or c2.kind != 0) and (c1.key == c2.key);
     }
 
-    sync func union(fst: DependencySet, snd: DependencySet) -> DependencySet {
+    func union(fst: DependencySet, snd: DependencySet) -> DependencySet {
         var result: DependencySet = {};
         for (id, _) in fst {
             result = result[id] := true;
@@ -151,16 +151,44 @@ role Node {
     }
 
     // Helper to check if a command is locally committed
-    sync func isCommitted(id: int) -> bool {
+    func isCommitted(id: int) -> bool {
         if (!exists(commands, id)) {
             return false;
         }
         return commands[id].phase == 3;
     }
 
+    func depsToString(deps: DependencySet) -> string {
+        var s: string = "{";
+        var first: bool = true;
+        for (id, _) in deps {
+            if (!first) {
+                s = s + ", ";
+            }
+            s = s + int_to_string(id);
+            first = false;
+        }
+        s = s + "}";
+        return s;
+    }
+
+    func listIntToString(l: list<int>) -> string {
+        var s: string = "[";
+        var first: bool = true;
+        for id in l {
+            if (!first) {
+                s = s + ", ";
+            }
+            s = s + int_to_string(id);
+            first = false;
+        }
+        s = s + "]";
+        return s;
+    }
+
 
     // Submit handles starting a new request. Figure 3 of EPaxos*.
-    func Submit(c: Payload, id: int) {
+    async func Submit(c: Payload, id: int) {
         println("Submit: Starting request ID " + int_to_string(id) + " for key: " + c.key);
         var localDeps: DependencySet = localConflicts(c);
         
@@ -185,7 +213,7 @@ role Node {
 
 
     // PreAccept handles an incoming PreAccept request. Figure 3 of EPaxos*.
-    func PreAccept(request: PreAcceptRequest) {
+    async func PreAccept(request: PreAcceptRequest) {
         println("PreAccept: Received request ID " + int_to_string(request.id) + " from sender.");
         
         // Precondition: we haven't started working on it.
@@ -231,7 +259,7 @@ role Node {
     }
 
     // preAcceptOKWithQuorum handles when we have a quorum after preAccept. See figure 3 of EPaxos*. 
-    sync func preAcceptOKWithQuorum(id: int) {
+    func preAcceptOKWithQuorum(id: int) {
         // Preconditions.
         if (!exists(commands, id)) { return (); }
         var command: Command = commands[id];
@@ -260,28 +288,15 @@ role Node {
             println("Quorum: ID " + int_to_string(id) + " taking slow path (depsMatch: " + bool_to_string(depsMatch) + ")"); // Using 0 for false log
         }
 
-        // A commit request is aliased for an accept request.
-        var request: AcceptRequest = CommitRequest{
-            sender: replicas[self],
-            ballot: 0,
-            id: id,
-            payload: command.payload,
-            dependencies: allDependencies,
-        };
-
         if (isFastPath) {
-            for node in replicas {
-                node->Commit(request);
-            }
+            BroadcastCommit(0, id, command.payload, allDependencies);
         } else {
-            for node in replicas {
-                node->Accept(request);
-            }
+            BroadcastAccept(0, id, command.payload, allDependencies);
         }
     }
 
     // PreAcceptOK handles all PreAcceptOK requests and decides whether we have a quorum.
-    func PreAcceptOK(request: PreAcceptOKRequest) {
+    async func PreAcceptOK(request: PreAcceptOKRequest) {
         // Precondition: we haven't already moved past this phase.
         if (!exists(commands, request.id)) { return (); }
         var cmd: Command = commands[request.id];
@@ -310,13 +325,13 @@ role Node {
         }
     }
 
-    func startOptimisticWaitTimer(id: int) {
+    async func startOptimisticWaitTimer(id: int) {
         var timeout_ch: chan<()> = set_timer(); 
         <- timeout_ch; 
         HandleOptimisticWaitTimeout(id);
     }
 
-    sync func HandleOptimisticWaitTimeout(id: int) {
+    func HandleOptimisticWaitTimeout(id: int) {
         if (!exists(commands, id)) {
             return ();
         }
@@ -331,7 +346,7 @@ role Node {
     }
 
     // Accept handles all Accept requests in the slow path (Figure 3).
-    func Accept(request: AcceptRequest) {
+    async func Accept(request: AcceptRequest) {
         println("Accept: Received Accept for ID " + int_to_string(request.id) + " ballot " + int_to_string(request.ballot) + " deps count: " + int_to_string(len(request.dependencies)));
         if (!exists(commands, request.id)) {
             return ();
@@ -368,7 +383,7 @@ role Node {
     }
 
     // AcceptOK handles all Accept responses in the slow path (Figure 3).
-    func AcceptOK(request: AcceptOKRequest) {
+    async func AcceptOK(request: AcceptOKRequest) {
         if (!exists(commands, request.id)) { return (); }
         var command: Command = commands[request.id];
         if (command.ballot != request.ballot) {
@@ -381,21 +396,12 @@ role Node {
 
         if (len(command.acceptResponses) >= slowQuorum()) {
             println("AcceptOK: ID " + int_to_string(request.id) + " slow quorum met. Committing.");
-            var req: CommitRequest = CommitRequest{
-                sender: replicas[self],
-                ballot: request.ballot,
-                id: request.id,
-                payload: command.payload,
-                dependencies: command.dependencies,
-            };
-            for node in replicas {
-                node->Commit(req);
-            }
+            BroadcastCommit(request.ballot, request.id, command.payload, command.dependencies);
         }
     }
 
     // Commit handles commit requests as in Figure 3.
-    func Commit(request: CommitRequest) {
+    async func Commit(request: CommitRequest) {
         println("Commit: ID " + int_to_string(request.id) + " is now COMMITTED.");
         if (!exists(commands, request.id)) {
             return ();
@@ -426,7 +432,7 @@ role Node {
     // Step 1 (Figure 1, Line 2): 
     // Compute the largest subgraph G where nodes are committed and dependencies exist in G.
     // We use memoized DFS to determine validity.
-    sync func buildExecutionGraph() -> list<int> {
+    func buildExecutionGraph() -> list<int> {
         v_valid = {};
         v_visiting = {};
         var graphNodes: list<int> = [];
@@ -445,7 +451,7 @@ role Node {
     }
 
     // Recursive validity check for graph inclusion
-    sync func checkValidity(id: int) -> bool {
+    func checkValidity(id: int) -> bool {
         if (exists(v_valid, id)) {
             return v_valid[id];
         }
@@ -478,7 +484,7 @@ role Node {
         return true;
     }
 
-    sync func getSCCs(graphNodes: list<int>) -> list<list<int>> {
+    func getSCCs(graphNodes: list<int>) -> list<list<int>> {
         // Reset State
         t_index = 0;
         t_stack = [];
@@ -492,11 +498,10 @@ role Node {
                 tarjanDFS(id);
             }
         }
-
         return t_sccs;
     }
 
-    sync func tarjanDFS(at: int) {
+    func tarjanDFS(at: int) {
         t_stack = append(t_stack, at); // Push
         t_onStack = t_onStack[at] := true;
         t_ids = t_ids[at] := t_index;
@@ -506,7 +511,7 @@ role Node {
         var cmd: Command = commands[at];
         // Iterate dependencies that are actually in our valid graph G
         for (to, _) in cmd.dependencies {
-            if (exists(commands, to) and isCommitted(to)) {
+            if (exists(v_valid, to) and v_valid[to]) {
                 if (!exists(t_ids, to)) {
                     tarjanDFS(to);
                     t_low = t_low[at] := min(t_low[at], t_low[to]);
@@ -543,7 +548,7 @@ role Node {
     }
 
     // Simple sort for IDs within an SCC (Bubble sort for simplicity)
-    sync func sortIDs(ids: list<int>) -> list<int> {
+    func sortIDs(ids: list<int>) -> list<int> {
         var n: int = len(ids);
         var i: int = 0;
         for ;i < n - 1; {
@@ -578,8 +583,11 @@ role Node {
                  result = kv_store[payload.key];
              }
         }
-        
-        // Notify waiting (if this node submitted the command)
+
+        notify(id, result);
+    }
+
+    async func notify(id: int, result: string?) {
         if (exists(pending, id)) {
             send(pending[id], result);
             pending = erase(pending, id);
@@ -596,10 +604,11 @@ role Node {
 
         for scc in sccs {
             var sortedSCC: list<int> = sortIDs(scc);
+            println("Execute: Processing SCC: " + listIntToString(sortedSCC));
             for id in sortedSCC {
                 var cmd: Command = commands[id];
                 if (!exists(executed, id)) {
-                    println("Execute: Running ID " + int_to_string(id));
+                    println("Execute: Running ID " + int_to_string(id) + " with deps: " + depsToString(cmd.dependencies));
                     executeCommand(id, cmd.payload);
                     executed = executed[id] := true;
                 }
@@ -607,36 +616,36 @@ role Node {
         }
     }
 
-    func startRecoveryTimer(id: int) {
+    async func startRecoveryTimer(id: int) {
         // var timeout_ch: chan<()> = set_timer();
         // <- timeout_ch;
         // CheckAndTriggerRecovery(id);
     }
 
-    sync func leader_detector(id: int) -> Node {
+    func leader_detector(id: int) -> Node {
         var n: int = len(replicas);
         return replicas[id % n];
     }
 
-    sync func CheckAndTriggerRecovery(id: int) {
+    async func CheckAndTriggerRecovery(id: int) {
         if exists(commands, id) and commands[id].phase != 3 {
             var leader: Node = leader_detector(id);
             if (leader == replicas[self]) {
-                recover(id);
+                <-recover(id);
             } else {
                 leader->TryRecover(id); 
             }
         }
     }
 
-    func TryRecover(id: int) {
+    async func TryRecover(id: int) {
         if (replicas[self] == leader_detector(id)) {
             recover(id);
         }
     }
 
     // Figure 5 of EPaxos*
-    sync func recover(id: int) {
+    async func recover(id: int) {
         println("Recovery: Initiating recovery for ID " + int_to_string(id));
         // Pick a higher ballot number to take over
         var current_bal: int = 0;
@@ -645,12 +654,15 @@ role Node {
         }
         var new_ballot: int = current_bal + 1; 
 
+        <- HandleRecover(new_ballot, id, replicas[self]);
         for node in replicas {
-            node->HandleRecover(new_ballot, id, replicas[self]);
+            if (node != replicas[self]) {
+                node->HandleRecover(new_ballot, id, replicas[self]);
+            }
         }
     }
 
-    sync func depsEqual(d1: DependencySet, d2: DependencySet) -> bool {
+    func depsEqual(d1: DependencySet, d2: DependencySet) -> bool {
         if (len(d1) != len(d2)) {
             return false;
         }
@@ -662,7 +674,7 @@ role Node {
         return true;
     }
 
-    sync func anyInU(U: list<RecoverResponse>, phase: int) -> bool {
+    func anyInU(U: list<RecoverResponse>, phase: int) -> bool {
         for r in U {
             if (r.phase == phase) {
                 return true;
@@ -671,7 +683,7 @@ role Node {
         return false;
     }
 
-    sync func getOneInU(U: list<RecoverResponse>, phase: int) -> RecoverResponse {
+    func getOneInU(U: list<RecoverResponse>, phase: int) -> RecoverResponse {
         for r in U {
             if (r.phase == phase) {
                 return r;
@@ -681,7 +693,7 @@ role Node {
         return U[0];
     }
 
-    func BroadcastCommit(b: int, id: int, c: Payload, D: DependencySet) {
+    async func BroadcastCommit(b: int, id: int, c: Payload, D: DependencySet) {
         var req: CommitRequest = CommitRequest{
             sender: replicas[self],
             ballot: b,
@@ -689,12 +701,15 @@ role Node {
             payload: c,
             dependencies: D,
         };
+        <- Commit(req);
         for node in replicas {
-            node->Commit(req);
+            if (node != replicas[self]) {
+                node->Commit(req);
+            }
         }
     }
 
-    func BroadcastAccept(b: int, id: int, c: Payload, D: DependencySet) {
+    async func BroadcastAccept(b: int, id: int, c: Payload, D: DependencySet) {
         var req: AcceptRequest = AcceptRequest{
             sender: replicas[self],
             ballot: b,
@@ -702,13 +717,16 @@ role Node {
             payload: c,
             dependencies: D,
         };
+        <- Accept(req);
         for node in replicas {
-            node->Accept(req);
+            if (node != replicas[self]) {
+                node->Accept(req);
+            }
         }
     }
 
     // Figure 5
-    func HandleRecover(b: int, id: int, q: Node) {
+    async func HandleRecover(b: int, id: int, q: Node) {
         if (!exists(commands, id) or commands[id].ballot < b) {
             if (!exists(commands, id)) {
                 commands = commands[id] := Command{
@@ -747,7 +765,7 @@ role Node {
     }
 
     // Figure 5
-    func HandleRecoverOK(request: RecoverResponse) {
+    async func HandleRecoverOK(request: RecoverResponse) {
         if (!exists(commands, request.id)) {
             return ();
         }
@@ -802,13 +820,16 @@ role Node {
         }
     }
 
-    func StartValidation(b: int, id: int, c: Payload, D: DependencySet) {
+    async func StartValidation(b: int, id: int, c: Payload, D: DependencySet) {
+        <- HandleValidate(b, id, c, D, replicas[self]);
         for node in replicas {
-            node->HandleValidate(b, id, c, D, replicas[self]);
+            if (node != replicas[self]) {
+                node->HandleValidate(b, id, c, D, replicas[self]);
+            }
         }
     }
 
-    func HandleValidate(b: int, id: int, c: Payload, D: DependencySet, q: Node) {
+    async func HandleValidate(b: int, id: int, c: Payload, D: DependencySet, q: Node) {
         if (commands[id].ballot == b) {
             // Collect local "invalidating" commands.
             var I: list<int> = findLocalInvalidators(id, c, D);
@@ -816,7 +837,7 @@ role Node {
         }
     }
 
-    sync func findLocalInvalidators(id: int, c: Payload, D: DependencySet) -> list<int> {
+    func findLocalInvalidators(id: int, c: Payload, D: DependencySet) -> list<int> {
         var I: list<int> = [];
 
         for (id_prime, cmd_prime) in commands {
@@ -852,7 +873,7 @@ role Node {
         return I;
     }
 
-    func HandleValidateOK(b: int, id: int, I_from_q: list<int>) {
+    async func HandleValidateOK(b: int, id: int, I_from_q: list<int>) {
         // var I_total: list<int> = computeUnion(collected_validations);
         // if (len(I_total) == 0) {
         //     // Safe to recover with proposed values 
@@ -871,7 +892,7 @@ role Node {
     }
 
 
-    func ClientWrite(key: string, value: string) -> string? {
+    async func ClientWrite(key: string, value: string) -> string? {
         var id: int = newId();
         var p: chan<string?> = make(1);
         pending = pending[id] := p;
@@ -882,7 +903,7 @@ role Node {
         return <-p;
     }
 
-    func ClientRead(key: string) -> string? {
+    async func ClientRead(key: string) -> string? {
         var id: int = newId();
         var p: chan<string?> = make(1);
         pending = pending[id] := p;
@@ -895,12 +916,12 @@ role Node {
 }
 
 ClientInterface {
-    func Read(dest: Node, key: string) -> string? {
+    async func Read(dest: Node, key: string) -> string? {
         var promise: chan<string?> = dest->ClientRead(key);
         return <-promise;
     }
 
-    func Write(dest: Node, key: string, value: string) {
+    async func Write(dest: Node, key: string, value: string) {
         var promise: chan<string?> = dest->ClientWrite(key, value);
         <-promise;
     }

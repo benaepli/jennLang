@@ -14,4 +14,4 @@ cd ..
 
 # 2. Run Porcupine on output/results.db
 echo "Running Porcupine on output/results.db..."
-./porcupine/main -input output/results.db -type sqlite -model kv -output-dir output
+./porcupine/main -input output/results.db -type duckdb -model kv -output-dir output
