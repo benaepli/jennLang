@@ -42,6 +42,12 @@ type RecoverResponse {
     sender: Node;
 }
 
+type WaitingRequest {
+    sender: Node;
+    id: int;
+    r_size: int;
+};
+
 type CommitRequest = AcceptRequest;
 
 type Command {
@@ -59,6 +65,11 @@ type Command {
     optimisticWaitTriggered: bool;
     acceptResponses: list<AcceptOKRequest>;
     recoverResponses: list<RecoverResponse>;
+    validateResponses: list<list<int>>;
+    validatingBallot: int;
+    validatingQuorumSize: int;
+    isWaiting: bool;
+    waitingOn: map<int, bool>;
 };
 
 
@@ -90,7 +101,6 @@ role Node {
     var kv_store: map<string, string> = {};
     var pending: map<int, chan<string?>> = {};
 
-    var cmd_seq: int = 0;
     var node_count: int = 0;
 
     async func Init(me: int, all: list<Node>) {
@@ -103,13 +113,6 @@ role Node {
         e = (n - f + 1) / 2;
         
         println("Initialized node. Node count: " + int_to_string(node_count) + " F: " + int_to_string(f) + " E: " + int_to_string(e));
-    }
-    
-    func newId() -> int {
-        // Simple stride strategy to ensure unique IDs across nodes
-        var id: int = (cmd_seq * node_count) + self;
-        cmd_seq = cmd_seq + 1;
-        return id;
     }
 
     func fastQuorum() -> int {
@@ -245,6 +248,11 @@ role Node {
             optimisticWaitTriggered: false,
             acceptResponses: [],
             recoverResponses: [],
+            validateResponses: [],
+            validatingBallot: 0,
+            validatingQuorumSize: 0,
+            isWaiting: false,
+            waitingOn: {},
         };
         commands = commands[request.id] := cmd;
 
@@ -373,6 +381,11 @@ role Node {
             optimisticWaitTriggered: false,
             acceptResponses: [],
             recoverResponses: [],
+            validateResponses: [],
+            validatingBallot: 0,
+            validatingQuorumSize: 0,
+            isWaiting: false,
+            waitingOn: {},
         };
         request.sender->AcceptOK(
             AcceptOKRequest{
@@ -424,9 +437,36 @@ role Node {
             optimisticWaitTriggered: false,
             acceptResponses: [],
             recoverResponses: [],
+            validateResponses: [],
+            validatingBallot: 0,
+            validatingQuorumSize: 0,
+            isWaiting: false,
+            waitingOn: {},
         };
 
         TryExecute();
+
+        for (waiting_id, waiting_cmd) in commands {
+            if (waiting_cmd.isWaiting and exists(waiting_cmd.waitingOn, request.id)) {
+                var is_invalidator: bool = false;
+                if (request.payload.kind != 2 and // Not Nop
+                    conflicts(waiting_cmd.payload, request.payload) and
+                    !exists(waiting_cmd.dependencies, request.id) and
+                    !exists(request.dependencies, waiting_id)) {
+                    is_invalidator = true;
+                }
+
+                if (is_invalidator) {
+                    BroadcastAccept(waiting_cmd.ballot, waiting_id, Payload{kind: 2, key: "", value: nil}, {});
+                } else {
+                    println("Commit: resuming " + int_to_string(waiting_id) + " after harmless commit of " + int_to_string(request.id));
+                    BroadcastAccept(waiting_cmd.ballot, waiting_id, waiting_cmd.payload, waiting_cmd.dependencies);
+                }
+                waiting_cmd = waiting_cmd.isWaiting := false;
+                waiting_cmd = waiting_cmd.waitingOn := {};
+                commands = commands[waiting_id] := waiting_cmd;
+            }
+        }
     }
 
     // Step 1 (Figure 1, Line 2): 
@@ -617,9 +657,9 @@ role Node {
     }
 
     async func startRecoveryTimer(id: int) {
-        // var timeout_ch: chan<()> = set_timer();
-        // <- timeout_ch;
-        // CheckAndTriggerRecovery(id);
+        var timeout_ch: chan<()> = set_timer();
+        <- timeout_ch;
+        CheckAndTriggerRecovery(id);
     }
 
     func leader_detector(id: int) -> Node {
@@ -654,10 +694,10 @@ role Node {
         }
         var new_ballot: int = current_bal + 1; 
 
-        <- HandleRecover(new_ballot, id, replicas[self]);
+        <- Recover(new_ballot, id, replicas[self]);
         for node in replicas {
             if (node != replicas[self]) {
-                node->HandleRecover(new_ballot, id, replicas[self]);
+                node->Recover(new_ballot, id, replicas[self]);
             }
         }
     }
@@ -726,7 +766,7 @@ role Node {
     }
 
     // Figure 5
-    async func HandleRecover(b: int, id: int, q: Node) {
+    async func Recover(b: int, id: int, q: Node) {
         if (!exists(commands, id) or commands[id].ballot < b) {
             if (!exists(commands, id)) {
                 commands = commands[id] := Command{
@@ -742,7 +782,12 @@ role Node {
                     preAcceptQuorumMet: false,
                     optimisticWaitTriggered: false,
                     acceptResponses: [],
-                    recoverResponses: []
+                    recoverResponses: [],
+                    validateResponses: [],
+                    validatingBallot: 0,
+                    validatingQuorumSize: 0,    
+                    isWaiting: false,
+                    waitingOn: {},
                 };
             } else {
                 var cmd: Command = commands[id];
@@ -751,7 +796,7 @@ role Node {
             }
 
             var cmd: Command = commands[id];
-            q->HandleRecoverOK(RecoverResponse{
+            q->RecoverOK(RecoverResponse{
                 ballot: b,
                 id: id,
                 acceptedBallot: cmd.acceptedBallot,
@@ -765,12 +810,35 @@ role Node {
     }
 
     // Figure 5
-    async func HandleRecoverOK(request: RecoverResponse) {
+    async func RecoverOK(request: RecoverResponse) {
         if (!exists(commands, request.id)) {
             return ();
         }
         var cmd: Command = commands[request.id];
         if (cmd.ballot != request.ballot) {
+            return ();
+        }
+
+        if (cmd.isWaiting) {
+             var initCoord: Node = replicas[request.id % node_count];
+             
+             if (request.phase == 3) {
+                 println("RecoverOK: Late COMMITTED received for ID " + int_to_string(request.id) + ". Finishing recovery.");
+                 BroadcastCommit(cmd.ballot, request.id, request.payload, request.dependencies);
+                 return ();
+             }
+             
+             else if (request.phase == 2) {
+                 println("RecoverOK: Late ACCEPTED received for ID " + int_to_string(request.id) + ". Finishing recovery.");
+                 BroadcastAccept(cmd.ballot, request.id, request.payload, request.dependencies);
+                 return ();
+             }
+             
+             else if (request.sender == initCoord) {
+                 println("RecoverOK: Late message from InitCoord for ID " + int_to_string(request.id) + ". Aborting to Nop.");
+                 BroadcastAccept(cmd.ballot, request.id, Payload{kind: 2, key: "", value: nil}, {});
+                 return ();
+             }
             return ();
         }
 
@@ -803,18 +871,35 @@ role Node {
                 var res: RecoverResponse = getOneInU(U, 2);
                 BroadcastAccept(b, id, res.payload, res.dependencies);
             } else {
-                // Check for potential Fast Path recovery
-                var R: list<RecoverResponse> = [];
+                // Initial coordinator safety check (Figure 5, Line 58)
+                var initCoordInQuorum: bool = false;
+                
+                // Assuming id % node_count identifies the initial owner/coordinator
+                var initCoord: Node = replicas[id % node_count];
+
                 for r in cmd.recoverResponses {
-                    if (r.phase == 1 and depsEqual(r.dependencies, r.initialDependencies)) { 
-                        R = append(R, r); 
+                    if (r.sender == initCoord) {
+                        initCoordInQuorum = true;
                     }
                 }
-                if (len(R) >= (len(replicas) - e)) { // Potential fast path
-                    StartValidation(b, id, R[0].payload, R[0].dependencies);
-                } else {
-                    // No progress found; propose Nop to clear the slot
+
+                if (initCoordInQuorum) {
                     BroadcastAccept(b, id, Payload{kind: 2, key: "", value: nil}, {});
+                } else {
+                    // Check for potential Fast Path recovery
+                    var R: list<RecoverResponse> = [];
+                    for r in cmd.recoverResponses {
+                        if (r.phase == 1 and depsEqual(r.dependencies, r.initialDependencies)) { 
+                            R = append(R, r);
+                        }
+                    }
+
+                    var currentRecoveryQuorumSize: int = len(cmd.recoverResponses);
+                    if (len(R) >= (currentRecoveryQuorumSize - e)) { 
+                        StartValidation(b, id, R[0].payload, R[0].dependencies);
+                    } else {
+                        BroadcastAccept(b, id, Payload{kind: 2, key: "", value: nil}, {});
+                    }
                 }
             }
         }
@@ -874,26 +959,104 @@ role Node {
     }
 
     async func HandleValidateOK(b: int, id: int, I_from_q: list<int>) {
-        // var I_total: list<int> = computeUnion(collected_validations);
-        // if (len(I_total) == 0) {
-        //     // Safe to recover with proposed values 
-        //     BroadcastAccept(b, id, recovered_payload, recovered_deps); 
-        // } else {
-        //     // Check if any in I_total are already committed [
-        //     if (anyCommittedInvalidator(I_total)) {
-        //         // Must abort and propose Nop to maintain consistency
-        //         BroadcastAccept(b, id, Payload{kind: 2}, {});
-        //     } else {
-        //         // All are uncommitted; must wait for them to resolve 
-        //         // Trigger the "Waiting" mechanism to prevent deadlocks 
-        //         StartWaitingMechanism(id, I_total);
-        //     }
-        // }
+        if (!exists(commands, id)) {
+            return ();
+        }
+        var cmd: Command = commands[id];
+
+        if (cmd.ballot != b) {
+            return ();
+        }
+
+        cmd = cmd.validateResponses := append(cmd.validateResponses, I_from_q);
+        commands = commands[id] := cmd;
+
+        if (len(cmd.validateResponses) >= slowQuorum()) {
+            var I_total: map<int, bool> = {};
+            for response_list in cmd.validateResponses {
+                for invalidator_id in response_list {
+                    I_total = I_total[invalidator_id] := true;
+                }
+            }
+
+            // If a command is already committed and conflicts without dependency, we must abort.
+            var has_strict_invalidator: bool = false;
+
+            for (id_prime, _) in I_total {
+                if (isCommitted(id_prime)) {
+                    var other: Command = commands[id_prime];
+                    if (other.payload.kind != 2 and
+                        conflicts(cmd.payload, other.payload) and
+                        !exists(cmd.dependencies, id_prime) and
+                        !exists(other.dependencies, id)) {
+
+                        has_strict_invalidator = true;
+                    }
+                }
+            }
+
+            if (has_strict_invalidator) {
+                // Case: Strict invalidator found -> Abort Recovery (Nop)
+                BroadcastAccept(b, id, Payload{kind: 2, key: "", value: nil}, {});
+            } else if (len(I_total) == 0) {
+                // Case: No invalidators -> Proceed with Recovery
+                BroadcastAccept(b, id, cmd.payload, cmd.dependencies);
+            } else {
+                // Case: Potential Invalidators -> Enter Waiting State
+                // We store the specific IDs we are waiting on to check later.
+                cmd = cmd.isWaiting := true;
+
+                cmd = cmd.waitingOn := I_total;
+                commands = commands[id] := cmd;
+
+                BroadcastWaiting(id);
+            }
+        }
+    }
+
+    func BroadcastWaiting(id: int) {
+        if (!exists(commands, id)) { return (); }
+        var cmd: Command = commands[id];
+
+        var req: WaitingRequest = WaitingRequest{
+            sender: replicas[self],
+            id: id,
+            r_size: cmd.validatingQuorumSize,
+        };
+
+        println("Waiting: ID " + int_to_string(id) + " is blocked. Broadcasting to all.");
+
+        for node in replicas {
+            node->HandleWaiting(req);
+        }
+    }
+
+    async func HandleWaiting(req: WaitingRequest) {
+        // Iterate over all commands we are currently recovering/waiting on
+        for (my_id, my_cmd) in commands {
+            if (my_cmd.isWaiting and my_cmd.ballot > 0) {
+                if (exists(my_cmd.waitingOn, req.id)) {
+                    var threshold: int = node_count - f - e;
+                    
+                    if (req.r_size > threshold) {
+                        println("HandleWaiting: Aborting " + int_to_string(my_id) + " to break deadlock with " + int_to_string(req.id));
+                        
+                        // Abort our recovery (Propose Nop)
+                        BroadcastAccept(my_cmd.ballot, my_id, Payload{kind: 2, key: "", value: nil}, {});
+                        
+                        // Clear wait state
+                        my_cmd = my_cmd.isWaiting := false;
+                        my_cmd = my_cmd.waitingOn := {};
+                        commands = commands[my_id] := my_cmd;
+                    }
+                }
+            }
+        }
     }
 
 
     async func ClientWrite(key: string, value: string) -> string? {
-        var id: int = newId();
+        var id: int = unique_id();
         var p: chan<string?> = make(1);
         pending = pending[id] := p;
         
@@ -904,7 +1067,7 @@ role Node {
     }
 
     async func ClientRead(key: string) -> string? {
-        var id: int = newId();
+        var id: int = unique_id();
         var p: chan<string?> = make(1);
         pending = pending[id] := p;
         

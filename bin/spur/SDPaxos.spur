@@ -1,0 +1,189 @@
+type Value = string;
+
+type Ballot {
+    round: int;
+    replica: Replica;
+};
+
+type WriteArgs {
+    key: string;
+    value: Value;
+};
+
+type Command enum {
+    Read(string),      
+    Write(WriteArgs),  
+    NoOp,
+};
+
+type CAcceptedArgs {
+    promised: Ballot;
+    accepted: Ballot;
+    value: Command;
+};
+
+type CInstanceState enum {
+    Empty,
+    Promised(Ballot),
+    Accepted(CAcceptedArgs),
+    Committed(Command),
+};
+
+type OAcceptedArgs {
+    promised: Ballot;
+    accepted: Ballot;
+    assigned: Replica?;
+};
+
+type OInstanceState enum {
+    Empty,
+    Promised(Ballot),
+    Accepted(OAcceptedArgs),
+    Committed(Replica?),
+};
+
+type CAccept {
+    view: int;
+    replica: Replica;
+    instance: int;
+    ballot: Ballot;
+    command: Command;
+};
+
+type CAck {
+    view: int;
+    replica: Replica;
+    instance: int;
+    ballot: Ballot;
+};
+
+type OAccept {
+    view: int;
+    instance: int;
+    ballot: Ballot;
+    assigned: Replica;
+};
+
+type OAck {
+    view: int;
+    instance: int;
+    ballot: Ballot;
+    assigned: Replica;
+};
+
+type ClientReadReply {
+    value: Value?;
+};
+
+type ClientWriteReply {
+    success: bool;
+};
+
+type Reply enum {
+    CAck(CAck),
+    ClientWriteReply(ClientWriteReply),
+    None,
+};
+
+type ClientWrite {
+    key: string;
+    value: string;
+    response_ch: chan<Reply>;
+};
+
+type Message enum {
+    ClientWrite(ClientWrite),
+    CAccept(CAccept),
+    CAck(CAck),
+    OAccept(OAccept),
+    OAck(OAck),
+};
+
+type SequencerState {
+    o_counter: int;
+    o_accept_acks: map<int, map<Replica, bool>>;
+    last_o_acked_by: map<Replica, int>;
+};
+
+role Replica {
+    var self: int = 0;
+    var peers: list<Replica> = [];
+    var sequencer: Replica? = nil;
+
+    var view: int = 0;
+    var c_counter: int = 0;
+
+    var c_instances: map<Replica, map<int, CInstanceState>> = {};
+    var c_accepts: map<int, list<Replica>> = {};
+
+    var o_instances: map<int, OInstanceState> = {};
+    var o_count_per_replica: map<Replica, int> = {};
+    var o_accepts: map<int, map<Replica, bool>> = {};
+
+    var execution_pointer: int = 0;
+
+    var sequencer_state: SequencerState? = nil;
+
+    var msg_ch: chan<(Message, chan<Reply?>)> = make(100); // TODO: fix
+
+    var pending_client_responses: map<(Replica, int), chan<Reply>> = {};
+
+    async func Init(me: int, all: list<Replica>) {
+        self = me;
+        peers = all;
+        sequencer = all[0];
+
+        run();
+    }
+
+    func is_valid(msg_view: int) -> bool {
+        return msg_view >= view;
+    }
+
+    async func run() {
+        while (true) {
+            var (msg, response_ch) = <- msg_ch;
+            proc(msg, response_ch);
+        }
+    }
+
+    func proc(msg: Message, response_ch: chan<Reply?>) {
+       match (msg) {
+            Message.ClientWrite(client_write) {
+                handle_client_write(client_write);
+            }
+            Message.CAccept(c_accept) {
+                handle_c_accept(c_accept);
+            }
+            Message.CAck(c_ack) {
+                handle_c_ack(c_ack);
+            }
+            Message.OAccept(o_accept) {
+                handle_o_accept(o_accept);
+            }
+            Message.OAck(o_ack) {
+                handle_o_ack(o_ack);
+            }
+       }
+    }
+
+    func handle_client_write(client_write: ClientWrite) {
+        
+    }
+
+    func handle_c_accept(c_accept: CAccept) {
+        
+    }
+
+    func handle_c_ack(c_ack: CAck) {
+        
+    }
+
+    func handle_o_accept(o_accept: OAccept) {
+        
+    }
+
+    func handle_o_ack(o_ack: OAck) {
+        
+    }
+}

@@ -10,3 +10,4 @@ output*.log
 output*.html
 output/
 output.db
+target

@@ -17,7 +17,7 @@ fi
 
 # Run spur compiler from the spur subdirectory
 echo "Compiling $SPEC_FILE using spur..."
-cd spur && cargo run --release -- compile "../$SPEC_FILE" ../output.json
+cd spur && cargo run --release -- compile "../$SPEC_FILE" --output ../output.json
 
 # Check if compilation was successful
 if [ $? -eq 0 ]; then
