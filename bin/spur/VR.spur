@@ -485,7 +485,7 @@ role Node {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) {
             // Not the primary. Return a failure/redirect response.
-            var p_err: chan<ClientResponse> = make(1);
+            var p_err: chan<ClientResponse> = make();
             var resp: ClientResponse = ClientResponse{
                 is_primary: false,
                 key: nil,
@@ -496,7 +496,7 @@ role Node {
             return p_err;
         }
         if (status != 0) {
-            var p_err: chan<ClientResponse> = make(1);
+            var p_err: chan<ClientResponse> = make();
             var resp: ClientResponse = ClientResponse{
                 is_primary: false,
                 key: nil,
@@ -512,7 +512,7 @@ role Node {
         prepare_ok_counts = prepare_ok_counts[op_number] := 0;
 
         // Create a promise for the client to await commitment
-        var p: chan<ClientResponse> = make(1);
+        var p: chan<ClientResponse> = make();
         pending_requests = pending_requests[op_number] := p;
 
         if (len(replicas) == 1) {

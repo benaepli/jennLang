@@ -23,7 +23,6 @@ type CAcceptedArgs {
 };
 
 type CInstanceState enum {
-    Empty,
     Promised(Ballot),
     Accepted(CAcceptedArgs),
     Committed(Command),
@@ -36,10 +35,27 @@ type OAcceptedArgs {
 };
 
 type OInstanceState enum {
-    Empty,
     Promised(Ballot),
     Accepted(OAcceptedArgs),
     Committed(Replica?),
+};
+
+type CPrepare {
+    view: int;
+    replica: Replica; // The replica attempting recovery
+    target: Replica; // The owner of the C-instance
+    instance: int;
+    ballot: Ballot;
+}; 
+
+type CPromise {
+    view: int;
+    replica: Replica;
+    instance: int;
+    ballot: Ballot;
+    // The highest ballot/value previously accepted by this peer
+    accepted_ballot: Ballot?; 
+    accepted_value: Command?;
 };
 
 type CAccept {
@@ -57,6 +73,14 @@ type CAck {
     ballot: Ballot;
 };
 
+type CCommit {
+    view: int;
+    replica: Replica;
+    instance: int;
+    ballot: Ballot;
+    command: Command;
+};
+
 type OAccept {
     view: int;
     instance: int;
@@ -68,11 +92,28 @@ type OAck {
     view: int;
     instance: int;
     ballot: Ballot;
-    assigned: Replica;
+    sender: Replica;
 };
 
+type OCommit {
+    view: int;
+    instance: int;
+    ballot: Ballot;
+    assigned: Replica;
+}; 
+
+type ClientRead {
+    key: string;
+}
+
 type ClientReadReply {
+    success: bool;
     value: Value?;
+};
+
+type ClientWrite {
+    key: string;
+    value: string;
 };
 
 type ClientWriteReply {
@@ -80,23 +121,9 @@ type ClientWriteReply {
 };
 
 type Reply enum {
-    CAck(CAck),
+    ClientReadReply(ClientReadReply),
     ClientWriteReply(ClientWriteReply),
-    None,
-};
-
-type ClientWrite {
-    key: string;
-    value: string;
-    response_ch: chan<Reply>;
-};
-
-type Message enum {
-    ClientWrite(ClientWrite),
-    CAccept(CAccept),
-    CAck(CAck),
-    OAccept(OAccept),
-    OAck(OAck),
+    NoOp,
 };
 
 type SequencerState {
@@ -105,14 +132,39 @@ type SequencerState {
     last_o_acked_by: map<Replica, int>;
 };
 
+type Vote {
+    view: int;
+    o_prepare_replies: map<int, OPrepareReply>;
+    max_c_accepted: map<Replica, int>;
+}
+
+type OPrepareReply {
+    instance: int;
+    promised: Ballot;
+    accepted: (Ballot, Replica)?;
+}
+
+type CandidatePhase {
+    votes: map<Replica, Vote>;
+
+}
+
+type ViewPhase enum {
+    Normal,
+    Candidate(CandidatePhase),
+    Voted(Replica),
+}
+
 role Replica {
     var self: int = 0;
     var peers: list<Replica> = [];
-    var sequencer: Replica? = nil;
 
     var view: int = 0;
+    var view_phase: ViewPhase = ViewPhase.Normal;
+
     var c_counter: int = 0;
 
+    var c_recovery_state: map<(Replica, int), map<Replica, CPromise>> = {};
     var c_instances: map<Replica, map<int, CInstanceState>> = {};
     var c_accepts: map<int, list<Replica>> = {};
 
@@ -121,69 +173,527 @@ role Replica {
     var o_accepts: map<int, map<Replica, bool>> = {};
 
     var execution_pointer: int = 0;
+    var exec_c_next: map<Replica, int> = {};
 
     var sequencer_state: SequencerState? = nil;
 
-    var msg_ch: chan<(Message, chan<Reply?>)> = make(100); // TODO: fix
-
+    var kv_store: map<string, string> = {};
     var pending_client_responses: map<(Replica, int), chan<Reply>> = {};
+    
 
     async func Init(me: int, all: list<Replica>) {
         self = me;
         peers = all;
-        sequencer = all[0];
 
-        run();
+        for var i = 0; i < len(peers); i = i + 1 {
+            c_instances = c_instances[peers[i]] := {};
+            o_count_per_replica = o_count_per_replica[peers[i]] := 0;
+            exec_c_next = exec_c_next[peers[i]] := 0;
+        }
+
+        if peers[self] == sequencer() {
+            sequencer_state = SequencerState{
+                o_counter:  0,
+                o_accept_acks: {},
+                last_o_acked_by: {},
+            };
+        }
     }
 
     func is_valid(msg_view: int) -> bool {
         return msg_view >= view;
     }
 
-    async func run() {
-        while (true) {
-            var (msg, response_ch) = <- msg_ch;
-            proc(msg, response_ch);
+    func new_c_number() -> int {
+        c_counter = c_counter + 1;
+        return c_counter;
+    }
+
+    func new_o_number() -> int {
+        var counter = sequencer_state!.o_counter;
+        sequencer_state = sequencer_state!.o_counter := counter + 1;
+        return counter;
+    }
+
+    func majority() -> int {
+        return len(peers) / 2 + 1;
+    }
+
+    func sequencer() -> Replica {
+        return peers[view % len(peers)];
+    }
+
+    func handle_new_view(new_view: int) {
+        if new_view > view {
+            view = new_view;
+            view_phase = ViewPhase.Normal;
         }
     }
 
-    func proc(msg: Message, response_ch: chan<Reply?>) {
-       match (msg) {
-            Message.ClientWrite(client_write) {
-                handle_client_write(client_write);
+    async func submit(cmd: Command, response_ch: chan<Reply>) {
+        var i = new_c_number();
+        var view = view;
+        var ballot = Ballot{
+            round: 0,
+            replica: peers[self],
+        };
+
+        c_instances = c_instances[peers[self]][i] := CInstanceState.Accepted(CAcceptedArgs{
+            promised: ballot,
+            accepted: ballot,
+            value: cmd,
+        });
+        var accepted_by = [peers[self]];
+        c_accepts = c_accepts[i] := accepted_by;
+        pending_client_responses = pending_client_responses[(peers[self], i)] := response_ch;
+
+        // Now, we send a CAccept to all other replicas.
+        var c_accept = CAccept{
+            view: view,
+            replica: peers[self],
+            instance: i,
+            ballot: ballot,
+            command: cmd,
+        };
+
+
+        var responses: chan<CAck> = make();
+        for peer in peers {
+            if peer != peers[self] {
+               send_c_accept(peer, c_accept, responses);
             }
-            Message.CAccept(c_accept) {
-                handle_c_accept(c_accept);
+        }
+
+        var count = 0;
+        for ;; {
+            <- responses;
+            count = count + 1;
+
+            if count >= majority() {
+                break;
             }
-            Message.CAck(c_ack) {
-                handle_c_ack(c_ack);
-            }
-            Message.OAccept(o_accept) {
-                handle_o_accept(o_accept);
-            }
-            Message.OAck(o_ack) {
-                handle_o_ack(o_ack);
-            }
-       }
+        }
+
+        // We handle committing here.
+        var c_commit = CCommit{
+            view: view,
+            replica: peers[self],
+            instance: i,
+            ballot: ballot,
+            command: cmd,
+        };
+
+        for peer in peers {
+            // This includes ourself.
+            send_c_commit(peer, c_commit);
+        }
+
     }
 
-    func handle_client_write(client_write: ClientWrite) {
-        
+    async func send_c_accept(peer: Replica, msg: CAccept, response_ch: chan<CAck>) {
+        var resp = <-peer->HandleCAccept(msg);
+        if resp != nil {
+            send(response_ch, resp!);
+        }
     }
 
-    func handle_c_accept(c_accept: CAccept) {
-        
+    async func send_c_commit(peer: Replica, msg: CCommit) {
+        peer->HandleCCommit(msg);
     }
 
-    func handle_c_ack(c_ack: CAck) {
+    async func HandleClientWrite(msg: ClientWrite) -> ClientWriteReply {
+        if view_phase != ViewPhase.Normal {
+            return ClientWriteReply{
+                success: false,
+            }
+        }
         
+
+        var response_ch: chan<Reply> = make();
+        submit(Command.Write(WriteArgs{
+            key: msg.key,
+            value: msg.value,
+        }), response_ch);
+        var result = <- response_ch;
+        return match result {
+            Reply.ClientWriteReply(h) => h,
+            _ => ClientWriteReply{
+                success: false,
+            },
+        }
     }
 
-    func handle_o_accept(o_accept: OAccept) {
-        
+    async func HandleClientRead(msg: ClientRead) -> ClientReadReply {
+        if view_phase != ViewPhase.Normal {
+            return ClientReadReply {
+                success: false,
+                value: nil,
+            }
+        }
+
+        var response_ch: chan<Reply> = make();
+        submit(Command.Read(msg.key), response_ch);
+        var result = <- response_ch;
+        return match result {
+            Reply.ClientReadReply(h) => h,
+            _ => ClientReadReply{
+                value: nil,
+                success: false,
+            },
+        }
     }
 
-    func handle_o_ack(o_ack: OAck) {
+    async func HandleCAccept(msg: CAccept) -> CAck? {
+        if !is_valid(msg.view) {
+            return nil;
+        }
+        if msg.view > view {
+            view = msg.view;
+            view_phase = ViewPhase.Normal;
+        }
+        var to_accept = true;
+        if exists(c_instances[msg.replica], msg.instance) {
+            var current = c_instances[msg.replica][msg.instance];
+            to_accept = match current {
+                CInstanceState.Promised(b) => msg.ballot.round >= b.round,
+                CInstanceState.Accepted(args) => msg.ballot.round >= args.promised.round,
+                CInstanceState.Committed(_) => false, 
+            };
+        }
+
+        if !to_accept {
+            return nil;
+        }
+
+        c_instances = c_instances[msg.replica][msg.instance] := 
+            CInstanceState.Accepted(CAcceptedArgs{
+                promised: msg.ballot,
+                accepted: msg.ballot,
+                value: msg.command,
+            });
+
+        // Now, we handle if we are the sequencer.
+        if peers[self] == sequencer() {
+            handle_sequencer_accept(msg);
+        }
+
+
+        return CAck {
+            view: view,
+            replica: peers[self],
+            instance: msg.instance,
+            ballot: msg.ballot,
+        };
+    }
+
+    async func HandleCCommit(msg: CCommit) {
+        if !is_valid(msg.view) {
+            return;
+        }
+        handle_new_view(msg.view);
+
+        c_instances = c_instances[msg.replica][msg.instance] := 
+            CInstanceState.Committed(msg.command);
+        try_execute();
+    }   
+
+    async func handle_sequencer_accept(msg: CAccept) {
+        if msg.instance < o_count_per_replica[msg.replica] {
+            return;
+        }
         
+        var o_number = new_o_number();
+        var ballot = Ballot {
+            round: 0,
+            replica: peers[self],
+        }; 
+
+        var accept_msg = OAccept{
+            view: view,
+            instance: o_number,
+            ballot: ballot,
+            assigned: msg.replica,
+        };
+        for peer in peers {
+            peer->HandleOAccept(accept_msg);
+        }
+    }
+
+    async func HandleOAccept(msg: OAccept) {
+        if !is_valid(msg.view) {
+            return;
+        }
+        handle_new_view(msg.view);
+
+        var to_accept = false;
+        if exists(o_instances, msg.instance) {
+            var current = o_instances[msg.instance];
+            to_accept = match current {
+                OInstanceState.Promised(b) => msg.ballot.round >= b.round,
+                OInstanceState.Accepted(args) => msg.ballot.round >= args.promised.round,
+                OInstanceState.Committed(_) => false, 
+            };
+        }
+
+        if !to_accept {
+            return;
+        }
+
+        msg.assigned->HandleOAck(OAck{
+            view: view,
+            instance: msg.instance,
+            ballot: msg.ballot,
+            sender: peers[self],
+        });
+    }
+
+    async func try_execute() {
+        for ;; {
+            // First, we check whether the O-instance is committed
+            if !exists(o_instances, execution_pointer) {
+                return;
+            }
+
+            var o_state = o_instances[execution_pointer];
+            var assigned_rep: Replica? = nil;
+
+            match o_state {
+                OInstanceState.Committed(r) => {
+                    if r == nil {
+                        execution_pointer = execution_pointer + 1;
+                        continue;
+                    }
+                    assigned_rep = r!;
+                },
+                _ => {return;}
+            }
+
+            // We must have C-committed too.
+            var c_idx = exec_c_next[assigned_rep!];
+            if !exists(c_instances, assigned_rep!) or !exists(c_instances[assigned_rep!], c_idx) {
+                return;
+            }
+            var c_state = c_instances[assigned_rep!][c_idx];
+            var cmd_to_run: Command? = nil;
+            match c_state {
+                CInstanceState.Committed(c) => {
+                    cmd_to_run = c;
+                },
+                _ => {return;}
+            }
+
+            // Execute the command
+            var reply: Reply? = nil;
+            match cmd_to_run! {
+                Command.Read(key) => {
+                    var val: string? = nil;
+                    if exists(kv_store, key) {
+                        val = kv_store[key];
+                    }
+                    reply = Reply.ClientReadReply(ClientReadReply{
+                        success: true,
+                        value: val,
+                    });
+                },
+                Command.Write(args) => {
+                    kv_store = kv_store[args.key] := args.value;
+                    reply = Reply.ClientWriteReply(ClientWriteReply{
+                        success: true,
+                    });
+                },
+                Command.NoOp => {
+                    reply = Reply.NoOp;
+                },
+            }
+
+            if exists(pending_client_responses, (assigned_rep!, c_idx)) {
+                var ch = pending_client_responses[(assigned_rep!, c_idx)];
+                send(ch, reply!);
+                pending_client_responses = erase(pending_client_responses, (assigned_rep!, c_idx));
+            }
+            exec_c_next = exec_c_next[assigned_rep!] := c_idx + 1;
+            execution_pointer = execution_pointer + 1;
+
+        }
+    }
+
+    async func HandleOAck(msg: OAck) {
+        if !is_valid(msg.view) {
+            return;
+        }
+        handle_new_view(msg.view);
+    
+        if !exists(sequencer_state!.o_accept_acks, msg.instance) {
+            sequencer_state = sequencer_state!.o_accept_acks := {};
+        }
+        sequencer_state = sequencer_state!.o_accept_acks[msg.instance][msg.sender] := true;
+
+        if len(sequencer_state!.o_accept_acks) >= majority() {
+            handle_oack_majority(msg.instance);
+        }
+    }
+
+    async func monitor_execution() { 
+        for ;; {
+            <- set_timer();
+            if !exists(o_instances, execution_pointer) {
+                continue;
+            }
+
+            var o_state = o_instances[execution_pointer];
+            match o_state {
+                OInstanceState.Committed(assigned_rep) => {
+                   if assigned_rep == nil { continue; }
+
+                   var c_idx = exec_c_next[assigned_rep!];
+                   var is_committed = false;
+                   if exists(c_instances, assigned_rep!) and exists(c_instances[assigned_rep!], c_idx) {
+                        match c_instances[assigned_rep!][c_idx] {
+                            CInstanceState.Committed(_) => { is_committed = true; },
+                            _ => {}
+                        }
+                   }
+
+                   if !is_committed {
+                        start_c_recovery(assigned_rep!, c_idx);
+                   }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    async func HandleOCommit(msg: OCommit) {
+        if !is_valid(msg.view) {
+            return;
+        }
+        handle_new_view(msg.view);
+
+        o_instances = o_instances[msg.instance] := OInstanceState.Committed(msg.assigned);
+        try_execute();
+    }
+
+    func get_min_proposal_ballot(target: Replica, instance: int) -> int {
+        if !exists(c_instances, target) or !exists(c_instances[target], instance) {
+            return 0;
+        }
+
+        return match c_instances[target][instance] {
+            CInstanceState.Promised(b) => b.round,
+            CInstanceState.Accepted(args) => args.promised.round,
+            CInstanceState.Committed(_) => 0, 
+        };
+    }
+
+    func start_c_recovery(target: Replica, instance: int) { 
+        var highest_seen_round = get_min_proposal_ballot(target, instance);
+        var this_round = highest_seen_round + 1;
+
+        var ballot = Ballot{
+            round: this_round,
+            replica: peers[self],
+        };
+        c_recovery_state[(target, instance)] := {};
+        var msg = CPrepare{
+            view: view,
+            replica: peers[self],
+            target: target,
+            instance: instance,
+            ballot: ballot
+        };
+        for peer in peers {
+            peer->HandleCPrepare(msg);
+        }
+    }
+
+    async func HandleCPrepare(msg: CPrepare) {
+        if !is_valid(msg.view) { return; }
+        
+        if !exists(c_instances, msg.target) { 
+            c_instances[msg.target] := {}; 
+        }
+
+        var current_promised_ballot_round = -1;
+        var accepted_val: Command? = nil;
+        var accepted_bal: Ballot? = nil;
+
+        if exists(c_instances[msg.target], msg.instance) {
+             match c_instances[msg.target][msg.instance] {
+                 CInstanceState.Promised(b) => { 
+                     current_promised_ballot_round = b.round; 
+                 },
+                 CInstanceState.Accepted(args) => {
+                     current_promised_ballot_round = args.promised.round;
+                     accepted_bal = args.accepted;
+                     accepted_val = args.value;
+                 },
+                 CInstanceState.Committed(cmd) => {
+                     return;
+                 }
+             }
+        }
+
+        if msg.ballot.round > current_promised_ballot_round {
+            c_instances[msg.target][msg.instance] := CInstanceState.Promised(msg.ballot);
+            msg.replica->HandleCPromise(CPromise{
+                view: view,
+                replica: peers[self],
+                instance: msg.instance,
+                ballot: msg.ballot,
+                accepted_ballot: accepted_bal,
+                accepted_value: accepted_val
+            });
+        }
+    }
+
+    async func HandleCPromise(msg: CPromise) {
+        if !is_valid(msg.view) { return; }
+        // TODO: finish
+    }
+
+
+    func get_o_ballot(instance: int) -> Ballot {
+        return match o_instances[instance] {
+            OInstanceState.Promised(b) => b,
+            OInstanceState.Accepted(args) => args.accepted,
+            OInstanceState.Committed(r) => Ballot{
+                round: 0,
+                replica: r!,
+            },
+        }
+    }
+
+    func handle_oack_majority(instance: int) {
+        for peer in peers {
+            peer->HandleOCommit(OCommit{
+                view: view,
+                instance: instance,
+                ballot: get_o_ballot(instance),
+                assigned: peers[self],
+            });
+        }
+    }
+}
+
+ClientInterface {
+
+    async func Write(dest: Replica, key: string, value: string) {
+        for ;; {
+            var resp: ClientWriteReply = <- dest->HandleClientWrite(ClientWrite{key: key, value: value});
+            if (resp.success == true) {
+                return ();
+            }
+        }
+    }
+
+    async func Read(dest: Replica, key: string) -> string? {
+        for ;; {
+            var resp: ClientReadReply = <- dest->HandleClientRead(ClientRead{key: key});
+            if (resp.success == true) {
+                return resp.value;
+            }
+        }
+
+        return nil;
     }
 }

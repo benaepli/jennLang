@@ -1057,7 +1057,7 @@ role Node {
 
     async func ClientWrite(key: string, value: string) -> string? {
         var id: int = unique_id();
-        var p: chan<string?> = make(1);
+        var p: chan<string?> = make();
         pending = pending[id] := p;
         
         var payload: Payload = Payload{kind: 1, key: key, value: value};
@@ -1068,7 +1068,7 @@ role Node {
 
     async func ClientRead(key: string) -> string? {
         var id: int = unique_id();
-        var p: chan<string?> = make(1);
+        var p: chan<string?> = make();
         pending = pending[id] := p;
         
         var payload: Payload = Payload{kind: 0, key: key, value: nil};
