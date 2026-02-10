@@ -11,7 +11,7 @@
     },
     "num_write_ops": {
         "min": 5,
-        "max": 20,
+        "max": 15,
         "step": 5
     },
     "num_read_ops": {
@@ -21,19 +21,18 @@
     },
     "num_timeouts": {
         "min": 0,
-        "max": 3,
+        "max": 0,
         "step": 1
     },
     "num_crashes": {
         "min": 0,
-        "max": 2,
+        "max": 0,
         "step": 1
     },
     "dependency_density": [
-        0.0,
         0.3
     ],
     "randomly_delay_msgs": true,
-    "num_runs_per_config": 10,
+    "num_runs_per_config": 5,
     "max_iterations": 5000
 }

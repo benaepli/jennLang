@@ -1,7 +1,0 @@
-{
-    "randomly_drop_msgs": true,
-    "cut_tail_from_mid": false,
-    "sever_all_to_tail_but_mid": false,
-    "partition_away_nodes": [],
-    "randomly_delay_msgs": false
-}

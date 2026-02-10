@@ -1,5 +1,0 @@
-(executable
- (name main)
- (public_name main)
- (libraries yojson mylib)
- (modules main execution benchmark config plan planGenerator))

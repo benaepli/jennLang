@@ -14,7 +14,7 @@ role Node {
     
     var inFailover: bool = false;
 
-    func Read(key: string) -> string? {
+    async func Read(key: string) -> string? {
         if (inFailover == true) {
             spin_await (inFailover == false);
         }
@@ -37,7 +37,7 @@ role Node {
         }
     }
 
-    func Write(key: string, value: string) -> () {
+    async func Write(key: string, value: string) -> () {
         if (inFailover == true) {
             spin_await (inFailover == false);
         }
@@ -79,7 +79,7 @@ role Node {
         }
     }
     
-    func AckWrite(key: string, value: string) -> () {
+    async func AckWrite(key: string, value: string) -> () {
         if (inFailover == true) {
             spin_await (inFailover == false);
         }
@@ -87,7 +87,7 @@ role Node {
         is_committed[key] = true;
     }
     
-    func TriggerFailover(failed_node: Node, new_tail: Node) -> () {
+    async func TriggerFailover(failed_node: Node, new_tail: Node) -> () {
         inFailover = true;
         
         if (failed_node == successor) {
@@ -125,12 +125,12 @@ role Node {
         }
     }
 
-    func EndFailover() -> () {
+    async func EndFailover() -> () {
         inFailover = false;
     }
 
 
-    func Init(assigned_role: string, pred: Node?, pred_pred: Node?, 
+    async func Init(assigned_role: string, pred: Node?, pred_pred: Node?, 
               succ: Node?, succ_succ: Node?, h: Node?, t: Node?, 
               s_node: Node?, data: map<string, string>) -> () {
         
@@ -155,7 +155,7 @@ role Node {
     }
 
     // Receiving dirty logs from new predecessor
-    func PropagateDirtyLogs(dirty_logs: map<string, string>) -> () {
+    async func PropagateDirtyLogs(dirty_logs: map<string, string>) -> () {
         var diff_dirty_logs: map<string, string> = {}; // Unused in original
         for ((key, value) in dirty_logs) {
             // Check for existence and mismatch
@@ -172,7 +172,7 @@ role Node {
     }
 
     // Receiving clean logs from new successor
-    func BackPropagateCleanLogs(clean_logs: map<string, string>) -> () {
+    async func BackPropagateCleanLogs(clean_logs: map<string, string>) -> () {
         var diff_clean_logs: map<string, string> = {}; // Unused in original
         for ((key, value) in clean_logs) {
             // Check for existence and mismatch
@@ -188,7 +188,7 @@ role Node {
     }
     
     // New tail receiving full state from old tail
-    func PropagateLogsToTail(other_db: map<string, string>) -> () {
+    async func PropagateLogsToTail(other_db: map<string, string>) -> () {
         r = "Tail";
         for ((key, value) in other_db) {
             db[key] = value;
@@ -200,26 +200,26 @@ role Node {
 
 ClientInterface { 
     
-    func read(dest: Node, key: string) -> string? {
+    async func read(dest: Node, key: string) -> string? {
         // Client awaits the result of the read
         var val: string? = @rpc_call(dest, Read(key));
         return val;
     }
 
-    func write(dest: Node, key: string, val: string) -> () {
+    async func write(dest: Node, key: string, val: string) -> () {
         // Client awaits the write to complete
         @rpc_call(dest, Write(key, val));
     }
 
-    func triggerFailover(dest: Node, failed_node: Node, new_tail: Node) -> () {
+    async func triggerFailover(dest: Node, failed_node: Node, new_tail: Node) -> () {
         @rpc_call(dest, TriggerFailover(failed_node, new_tail));
     }
 
-    func endFailover(dest: Node) -> () {
+    async func endFailover(dest: Node) -> () {
         @rpc_call(dest, EndFailover());
     }
 
-    func init(dest: Node, name: string, pred: Node?, pred_pred: Node?, 
+    async func init(dest: Node, name: string, pred: Node?, pred_pred: Node?, 
               succ: Node?, succ_succ: Node?, hd: Node?, tl: Node?, 
               s_node: Node?, data: map<string, string>) -> () {
         
