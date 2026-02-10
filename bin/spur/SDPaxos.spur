@@ -50,7 +50,8 @@ type CPrepare {
 
 type CPromise {
     view: int;
-    replica: Node;
+    replica: Node; // The replica sending the promise
+    target_node: Node; // The owner of the C-instance
     instance: int;
     ballot: Ballot;
     // The highest ballot/value previously accepted by this peer
@@ -202,6 +203,8 @@ role Node {
         }
 
         println("Node " + int_to_string(self) + " initialized. Peer count: " + int_to_string(len(peers)));
+
+        monitor_execution();
     }
 
     func is_valid(msg_view: int) -> bool {
@@ -274,7 +277,7 @@ role Node {
             handle_sequencer_accept(c_accept);
         }
 
-        var count = 0;
+        var count = 1;
         for ;; {
             <- responses;
             count = count + 1;
@@ -413,25 +416,35 @@ role Node {
     }   
 
     async func handle_sequencer_accept(msg: CAccept) {
-        if msg.instance < o_count_per_replica[msg.replica] {
+        var current_count = o_count_per_replica[msg.replica];
+
+        // If we already assigned slots up to and including msg.instance, skip.
+        if msg.instance < current_count {
             return;
         }
-        
-        var o_number = new_o_number();
-        var ballot = Ballot {
-            round: 0,
-            replica: peers[self],
-        }; 
 
-        var accept_msg = OAccept{
-            view: view,
-            instance: o_number,
-            ballot: ballot,
-            assigned: msg.replica,
-        };
-        println("Sequencer: Assigning O-instance " + int_to_string(o_number) + " to a C-instance from some replica.");
-        for peer in peers {
-            peer->HandleOAccept(accept_msg);
+        // Assign slots until we have covered up to msg.instance (i.e., count > msg.instance).
+        for ;current_count <= msg.instance; {
+            var o_number = new_o_number();
+
+            var ballot = Ballot {
+                round: 0,
+                replica: peers[self],
+            }; 
+
+            var accept_msg = OAccept{
+                view: view,
+                instance: o_number,
+                ballot: ballot,
+                assigned: msg.replica,
+            };
+            println("Sequencer: Assigning O-instance " + int_to_string(o_number) + " to C-instance (" + role_to_string(msg.replica) + ", " + int_to_string(current_count) + ")");
+            for peer in peers {
+                peer->HandleOAccept(accept_msg);
+            }
+
+            current_count = current_count + 1;
+            o_count_per_replica = o_count_per_replica[msg.replica] := current_count;
         }
     }
 
@@ -669,8 +682,6 @@ role Node {
         }
 
         var current_promised_ballot_round = -1;
-        var accepted_val: Command? = nil;
-        var accepted_bal: Ballot? = nil;
 
         if exists(c_instances[msg.target], msg.instance) {
              match c_instances[msg.target][msg.instance] {
@@ -679,8 +690,6 @@ role Node {
                  },
                  CInstanceState.Accepted(args) => {
                      current_promised_ballot_round = args.promised.round;
-                     accepted_bal = args.accepted;
-                     accepted_val = args.value;
                  },
                  CInstanceState.Committed(cmd) => {
                      return;
@@ -689,10 +698,32 @@ role Node {
         }
 
         if msg.ballot.round > current_promised_ballot_round {
-            c_instances = c_instances[msg.target][msg.instance] := CInstanceState.Promised(msg.ballot);
+            var new_state = CInstanceState.Promised(msg.ballot);
+            var accepted_val: Command? = nil;
+            var accepted_bal: Ballot? = nil;
+
+            if exists(c_instances[msg.target], msg.instance) {
+                match c_instances[msg.target][msg.instance] {
+                    CInstanceState.Accepted(args) => {
+                        // Update promise, keep value
+                        new_state = CInstanceState.Accepted(CAcceptedArgs{
+                            promised: msg.ballot,      
+                            accepted: args.accepted,   
+                            value: args.value          
+                        });
+                        accepted_bal = args.accepted;
+                        accepted_val = args.value;
+                    },
+                    _ => {}
+                }
+            }
+            
+            c_instances = c_instances[msg.target][msg.instance] := new_state;
+
             msg.replica->HandleCPromise(CPromise{
                 view: view,
                 replica: peers[self],
+                target_node: msg.target,
                 instance: msg.instance,
                 ballot: msg.ballot,
                 accepted_ballot: accepted_bal,
@@ -703,7 +734,93 @@ role Node {
 
     async func HandleCPromise(msg: CPromise) {
         if !is_valid(msg.view) { return; }
-        // TODO: finish
+
+        var key = (msg.target_node, msg.instance);
+
+        // If we aren't recovering this, ignore
+        if !exists(c_recovery_state, key) { return; }
+
+        c_recovery_state = c_recovery_state[key][msg.replica] := msg;
+
+        println("HandleCPromise: Received CPromise for instance (" + role_to_string(msg.target_node) + ", " + int_to_string(msg.instance) + ") from " + role_to_string(msg.replica) + " (count: " + int_to_string(len(c_recovery_state[key])) + "/" + int_to_string(majority()) + ")");
+
+        if len(c_recovery_state[key]) >= majority() {
+            // Erase immediately so late-arriving promises don't re-trigger this block
+            var promises = c_recovery_state[key];
+            c_recovery_state = erase(c_recovery_state, key);
+
+            var max_ballot_round: int = -1;
+            var value_to_propose: Command = Command.NoOp;
+            var found_value = false;
+
+            for (peer_node, _) in promises {
+                var p = promises[peer_node];
+
+                if p.accepted_ballot != nil {
+                    if p.accepted_ballot!.round > max_ballot_round {
+                        max_ballot_round = p.accepted_ballot!.round;
+                        value_to_propose = p.accepted_value!;
+                        found_value = true;
+                    }
+                }
+            }
+
+            if !found_value {
+                println("Recovery: No value found for (" + role_to_string(msg.target_node) + ", " + int_to_string(msg.instance) + "). Proposing NoOp.");
+            } else {
+                println("Recovery: Found existing value for (" + role_to_string(msg.target_node) + ", " + int_to_string(msg.instance) + "). Reproposing.");
+            }
+
+            println("Recovery: Collected majority promises for (" + role_to_string(msg.target_node) + ", " + int_to_string(msg.instance) + "). Sending CAccept.");
+
+            var my_ballot = msg.ballot;
+
+            var accept_msg = CAccept{
+                view: view,
+                replica: msg.target_node,
+                instance: msg.instance,
+                ballot: my_ballot,
+                command: value_to_propose,
+            };
+
+            c_instances = c_instances[msg.target_node][msg.instance] := 
+                CInstanceState.Accepted(CAcceptedArgs{
+                    promised: my_ballot,
+                    accepted: my_ballot,
+                    value: value_to_propose,
+                });
+
+            var responses: chan<CAck> = make();
+            for peer in peers {
+                if peer != peers[self] {
+                    send_c_accept(peer, accept_msg, responses);
+                }
+            }
+
+            var count = 0;
+            for ;; {
+                <- responses;
+                count = count + 1;
+
+                if count >= majority() {
+                    break;
+                }
+            }
+
+            println("Recovery: Received majority ACKs for (" + role_to_string(msg.target_node) + ", " + int_to_string(msg.instance) + "). Committing.");
+
+            var c_commit = CCommit{
+                view: view,
+                replica: msg.target_node,
+                instance: msg.instance,
+                ballot: my_ballot,
+                command: value_to_propose,
+            };
+
+            for peer in peers {
+                send_c_commit(peer, c_commit);
+            }
+        }
     }
 
 
