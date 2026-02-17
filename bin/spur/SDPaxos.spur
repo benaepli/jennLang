@@ -103,6 +103,41 @@ type OCommit {
     assigned: Node;
 }; 
 
+type VRequest {
+    new_view: int;
+    candidate: Node;
+}
+
+type OLogEntry {
+    instance: int;
+    ballot: Ballot;
+    assigned: Node?;
+}
+
+type VVote {
+    view: int;
+    voter: Node;
+    // Max O-instances accepted by this voter
+    o_log_entries: list<OLogEntry>; 
+    max_c_seen: map<Node, int>; 
+}
+
+type NewView {
+    view: int;
+    sequencer: Node;
+    // The reconstructed assignment log to sync everyone
+    reconstructed_assignments: map<int, Node>; 
+}
+
+type NewViewAck {
+    view: int;
+    sender: Node;
+};
+
+type NewViewCommit {
+    view: int;
+};
+
 type ClientRead {
     key: string;
 }
@@ -145,14 +180,9 @@ type OPrepareReply {
     accepted: (Ballot, Node)?;
 }
 
-type CandidatePhase {
-    votes: map<Node, Vote>;
-
-}
-
 type ViewPhase enum {
     Normal,
-    Candidate(CandidatePhase),
+    Candidate,
     Voted(Node),
 }
 
@@ -183,6 +213,8 @@ role Node {
     var kv_store: map<string, string> = {};
     var pending_client_responses: map<(Node, int), chan<Reply>> = {};
     
+    // Track if we heard from the sequencer recently
+    var received_sequencer_message: bool = false;
 
     async func Init(me: int, all: list<Node>) {
         self = me;
@@ -205,6 +237,7 @@ role Node {
         println("Node " + int_to_string(self) + " initialized. Peer count: " + int_to_string(len(peers)));
 
         monitor_execution();
+        do_view_changes();
     }
 
     func is_valid(msg_view: int) -> bool {
@@ -416,6 +449,10 @@ role Node {
     }   
 
     async func handle_sequencer_accept(msg: CAccept) {
+        if sequencer_state == nil {
+            return;
+        }
+
         var current_count = o_count_per_replica[msg.replica];
 
         // If we already assigned slots up to and including msg.instance, skip.
@@ -474,6 +511,10 @@ role Node {
             accepted: msg.ballot,
             assigned: msg.assigned,
         });
+
+        if msg.view == view {
+            received_sequencer_message = true;
+        }
 
         <-msg.assigned->HandleOAck(OAck{
             view: view,
@@ -628,6 +669,18 @@ role Node {
         }
     }
 
+    async func do_view_changes() {
+        for ;; {
+            <- set_timer();
+            
+            if received_sequencer_message {
+                received_sequencer_message = false;
+                continue;
+            }
+            start_view_change();
+        }
+    }
+
     async func HandleOCommit(msg: OCommit) {
         println("HandleOCommit: Committing O-instance " + int_to_string(msg.instance) + " at view " + int_to_string(msg.view));
         if !is_valid(msg.view) {
@@ -640,7 +693,10 @@ role Node {
     }
 
     func get_min_proposal_ballot(target: Node, instance: int) -> int {
-        if !exists(c_instances, target) or !exists(c_instances[target], instance) {
+        if !exists(c_instances, target) {
+            return 0;
+        }
+        if !exists(c_instances[target], instance) {
             return 0;
         }
 
@@ -840,6 +896,13 @@ role Node {
             return; 
         }
 
+        match o_instances[instance] {
+            OInstanceState.Committed(r) => {
+                if r == nil { return; }
+            },
+            _ => {}
+        }
+
         o_ack_handled = o_ack_handled[instance] := true;
         for peer in peers {
             peer->HandleOCommit(OCommit{
@@ -851,7 +914,256 @@ role Node {
         }
     }
 
+    async func start_view_change() {
+        view = view + 1;
+        view_phase = ViewPhase.Candidate;
 
+        println("Node " + int_to_string(self) + " starting view change to view " + int_to_string(view));
+        var msg = VRequest {
+            new_view: view,
+            candidate: peers[self]
+        };
+
+        var vote_ch: chan<(Node, Vote)> = make();
+        for peer in peers {
+            send_v_request(peer, msg, vote_ch);
+        }
+
+        var votes_collected: map<Node, Vote> = {};
+        var count = 0;
+
+        for ;; {
+            var (voter, vote_data) = <- vote_ch;
+            if vote_data.view != view or exists(votes_collected, voter) {
+                continue;
+            } 
+
+            votes_collected = votes_collected[voter] := vote_data;
+            count = count + 1;
+
+            if count >= majority() {
+                println("View Change: majority achieved. Becoming sequencer.");
+                become_sequencer(votes_collected);
+                break;
+            }
+        }
+    }
+
+    async func send_v_request(peer: Node, msg: VRequest, ch: chan<(Node, Vote)>) {
+        var resp = <- peer->HandleVRequest(msg);
+        if resp != nil {
+            send(ch, (peer, resp!));
+        }
+    }
+
+    async func HandleVRequest(msg: VRequest) -> Vote? {
+        if msg.new_view < view {
+            return nil;
+        }
+        if msg.new_view > view {
+            view = msg.new_view;
+            view_phase = ViewPhase.Voted(msg.candidate);
+        }
+
+        println("HandleVRequest: Voting for " + role_to_string(msg.candidate) + " in view " + int_to_string(view));
+        
+        var o_replies: map<int, OPrepareReply> = {};
+        for (idx, state) in o_instances {
+            var reply = OPrepareReply {
+                instance: idx,
+                promised: Ballot{ round: 0, replica: peers[self] },
+                accepted: nil
+            };
+            match state {
+                OInstanceState.Promised(b) => {
+                    reply = reply.promised := b;
+                },
+                OInstanceState.Accepted(args) => {
+                    reply = reply.promised := args.promised;
+                    if args.assigned != nil {
+                        reply = reply.accepted := (args.accepted, args.assigned!);
+                    }
+                },
+                OInstanceState.Committed(assigned_node) => {
+                    if assigned_node != nil {
+                        reply = reply.accepted := (
+                             Ballot{ round: 2147483647, replica: peers[self] },
+                             assigned_node!
+                        );
+                    }
+                }
+            }
+            o_replies = o_replies[idx] := reply;
+        }        
+
+        var max_c_map: map<Node, int> = {};
+        for peer in peers {
+            var max_idx = -1;
+            if exists(c_instances, peer) {
+                 for (c_idx, c_state) in c_instances[peer] {
+                     var seen = match c_state {
+                         CInstanceState.Promised(_) => false,
+                         _ => true
+                     };
+                     
+                     if seen and c_idx > max_idx {
+                         max_idx = c_idx;
+                     }
+                 }
+            }
+            max_c_map = max_c_map[peer] := max_idx;
+        }
+
+        return Vote {
+            view: view,
+            o_prepare_replies: o_replies,
+            max_c_accepted: max_c_map
+        };
+    }
+
+    async func become_sequencer(votes: map<Node, Vote>) {
+        println("Reconstructing Log from " + int_to_string(len(votes)) + " votes...");
+        var candidates: map<int, (Ballot, Node)> = {};
+        var max_o_index = -1;
+
+        for (voter, vote_data) in votes {
+            for (idx, reply) in vote_data.o_prepare_replies {
+                if idx > max_o_index {
+                    max_o_index = idx;
+                }
+
+                if reply.accepted != nil {
+                    var (b, val) = reply.accepted!;
+                    
+                    var update = true;
+                    if exists(candidates, idx) {
+                        var (current_best_bal, a) = candidates[idx];
+                        if b.round <= current_best_bal.round {
+                            update = false;
+                        }
+                    }
+
+                    if update {
+                        candidates = candidates[idx] := (b, val);
+                    }
+                }
+            }
+        }
+
+        var final_log: map<int, Node> = {};
+        for (idx, data) in candidates {
+            final_log = final_log[idx] := data.1;
+        }
+
+        sequencer_state = SequencerState {
+            o_counter: max_o_index + 1,
+            o_accept_acks: {},
+            last_o_acked_by: {}
+        };
+
+        var self_ballot = Ballot{ round: 0, replica: peers[self] };
+        for (idx, assigned_node) in final_log {
+             o_instances = o_instances[idx] := OInstanceState.Accepted(OAcceptedArgs{
+                promised: self_ballot,
+                accepted: self_ballot,
+                assigned: assigned_node
+            });
+        }
+
+        println("Log reconstructed. Max index: " + int_to_string(max_o_index) + ". Broadcasting NewView and waiting for ACKs...");
+        
+        var nv = NewView {
+            view: view,
+            sequencer: peers[self],
+            reconstructed_assignments: final_log
+        };
+
+        var ack_ch: chan<NewViewAck> = make();
+        
+        for peer in peers {
+            if peer != peers[self] {
+                send_new_view_and_wait(peer, nv, ack_ch);
+            }
+        }
+
+        var count = 1; 
+        for ;; {
+            if count >= majority() { break; }
+            var ack = <- ack_ch;
+            if ack.view == view {
+                count = count + 1;
+            }
+        }
+
+        println("View " + int_to_string(view) + " synchronized. Broadcasting Commit.");
+
+        var commit_msg = NewViewCommit { view: view };
+        for peer in peers {
+            peer->HandleNewViewCommit(commit_msg);
+        }
+        
+        view_phase = ViewPhase.Normal;
+    }
+
+    async func send_new_view_and_wait(peer: Node, msg: NewView, ch: chan<NewViewAck>) {
+        var resp = <- peer->HandleNewView(msg);
+        if resp != nil {
+            send(ch, resp!);
+        }
+    }
+
+    async func HandleNewView(msg: NewView) -> NewViewAck? {
+        if msg.view < view {
+            return nil;
+        }
+
+        println("HandleNewView: Installing view " + int_to_string(msg.view) + ". waiting for commit.");
+        view = msg.view;
+        view_phase = ViewPhase.Normal; 
+        received_sequencer_message = true;
+        
+        var b = Ballot { round: 0, replica: msg.sequencer };
+
+        var max_seq_idx = -1;
+        for (idx, _) in msg.reconstructed_assignments {
+            if idx > max_seq_idx { max_seq_idx = idx; }
+        }
+
+        for var i = 0; i <= max_seq_idx; i = i + 1 {
+            var assigned_node: Node? = nil;
+            if exists(msg.reconstructed_assignments, i) {
+                assigned_node = msg.reconstructed_assignments[i];
+            }
+            
+            o_instances = o_instances[i] := OInstanceState.Accepted(OAcceptedArgs{
+                promised: b,
+                accepted: b,
+                assigned: assigned_node
+            });
+        }
+
+        if peers[self] != msg.sequencer {
+            sequencer_state = nil;
+        }
+        
+        return NewViewAck { view: view, sender: peers[self] };
+    }
+
+    async func HandleNewViewCommit(msg: NewViewCommit) {
+        if msg.view < view { return; }
+        
+        for (idx, state) in o_instances {
+            match state {
+                OInstanceState.Accepted(args) => {
+                    o_instances = o_instances[idx] := OInstanceState.Committed(args.assigned);
+                },
+                _ => {}
+            }
+        }
+        
+        println("View Sync Complete. Executing.");
+        try_execute();
+    }
 }
 
 ClientInterface {
