@@ -12,6 +12,6 @@ cd porcupine
 go build -o main main.go
 cd ..
 
-# 2. Run Porcupine on output/results.db
-echo "Running Porcupine on output/results.db..."
-./porcupine/main -input output/results.db -type duckdb -model kv -output-dir output
+# 2. Run Porcupine on output/ (auto-detects DuckDB file or Parquet directory)
+echo "Running Porcupine on output/..."
+./porcupine/main -input output -type duckdb -model kv -output-dir output

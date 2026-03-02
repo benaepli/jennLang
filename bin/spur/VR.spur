@@ -75,6 +75,7 @@ role Node {
         for var i: int = 0; i < len(peers); i = i + 1 {
             replicas = append(replicas, peers[i]);
         }
+        println("Node " + int_to_string(self) + " initialized. Peer count: " + int_to_string(len(peers)));
     }
 
     async func RecoverInit(me: int, peers: list<Node>) {
@@ -85,6 +86,7 @@ role Node {
         }
 
         recovery_nonce = recovery_nonce + 1;
+        println("Node " + int_to_string(self) + " starting recovery with nonce " + int_to_string(recovery_nonce));
 
         // Clear state from any previous recovery attempts
         recovery_responses = [];
@@ -126,12 +128,14 @@ role Node {
 
             if (cmd.kind == 1) { // Write
                 kv_store = kv_store[cmd.key] := cmd.value!;
+                println("Execute: op_number " + int_to_string(op_n) + " WRITE key=" + cmd.key);
             } else if (cmd.kind == 0) { // Read
                 if (exists(kv_store, cmd.key)) {
                     result = kv_store[cmd.key];
                 } else {
                     println("Read of an unwritten key.");
                 }
+                println("Execute: op_number " + int_to_string(op_n) + " READ key=" + cmd.key);
             } else {
                 println("Impossible!");
             }
@@ -153,6 +157,7 @@ role Node {
     }
 
     async func Prepare(other_view: int, other_request: Command, other_op_number: int, other_commit_number: int) {
+        println("HandlePrepare: Received Prepare for op_number " + int_to_string(other_op_number) + " at view " + int_to_string(other_view));
         if (other_view != view_number) { return (); }
         if (status != 0) { return (); }
         if (other_op_number <= op_number) { return (); }
@@ -180,6 +185,7 @@ role Node {
     }
 
     async func PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
+        println("HandlePrepareOK: Received PrepareOK for op_number " + int_to_string(other_op_number) + " at view " + int_to_string(other_view));
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] == current_primary and other_view == view_number and status == 0) {
             if (!exists(prepare_ok_counts, other_op_number)) {
@@ -199,6 +205,7 @@ role Node {
         }
     }
     async func Commit(other_view: int, other_commit_number: int) {
+        println("HandleCommit: Committing up to op_number " + int_to_string(other_commit_number) + " at view " + int_to_string(other_view));
         if (other_view == view_number and status == 0 and other_commit_number > commit_number) {
             commit_number = other_commit_number;
             apply_committed_entries();
@@ -206,6 +213,7 @@ role Node {
     }
 
     func enter_view_change(new_view: int) {
+        println("Node " + int_to_string(self) + " entering view change to view " + int_to_string(new_view));
         status = 1;
         view_number = new_view;
 
@@ -233,6 +241,7 @@ role Node {
     }
 
     func enter_normal_mode(v: int, new_log: list<LogEntry>, op_n: int, commit_n: int) {
+        println("Node " + int_to_string(self) + " entering normal mode at view " + int_to_string(v) + " with op_number " + int_to_string(op_n) + " commit_number " + int_to_string(commit_n));
         status = 0;
         view_number = v;
         log = new_log;
@@ -263,6 +272,7 @@ role Node {
     }
 
     async func StartViewChange(new_view: int, replica_id: Node) {
+        println("HandleStartViewChange: Node " + int_to_string(self) + " received StartViewChange for view " + int_to_string(new_view));
         if (status == 2) {
             return ();
         }
@@ -312,6 +322,7 @@ role Node {
             var quorum: int = f() + 1;
             
             if (len(do_view_change_senders) == quorum) {
+                println("DoViewChange: Majority achieved. Becoming primary for view " + int_to_string(new_view));
                 
                 var first_msg: DoViewChangeMsg = do_view_change_messages[0];
                 var best_log: list<LogEntry> = first_msg.log;
@@ -342,10 +353,11 @@ role Node {
     }
 
     async func StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
+        println("HandleStartView: Installing view " + int_to_string(new_view) + " with op_number " + int_to_string(new_op_number) + " commit_number " + int_to_string(new_commit_number));
         if (status == 2) {
             return ();
         }
-        if (new_view >= view_number) {
+        if (new_view > view_number or (new_view == view_number and status == 1)) {
             enter_normal_mode(new_view, new_log, new_op_number, new_commit_number);
             var new_primary: Node = primary_of(view_number);
             if (replicas[self] != new_primary) {
@@ -357,6 +369,7 @@ role Node {
     }
 
     async func Recovery(replica_id: Node, nonce: int, checkpoint_op: int) {
+        println("HandleRecovery: Received Recovery request for nonce " + int_to_string(nonce) + " checkpoint_op " + int_to_string(checkpoint_op));
         // Only respond if status is normal
         if (status != 0) {
             return ();
@@ -383,6 +396,7 @@ role Node {
     }
 
     async func RecoveryResponse(other_view: int, other_nonce: int, other_log: list<LogEntry>?, other_op_number: int?, other_commit_number: int?, sender_id: Node) {
+        println("HandleRecoveryResponse: Received RecoveryResponse for nonce " + int_to_string(other_nonce) + " at view " + int_to_string(other_view));
         if (status != 2) {
             return ();
         }
@@ -464,6 +478,7 @@ role Node {
         }
         log = new_log;
 
+        println("Node " + int_to_string(self) + " recovery complete. view=" + int_to_string(view_number) + " op_number=" + int_to_string(op_number) + " commit_number=" + int_to_string(commit_number));
         status = 0;
 
         recovery_responses = [];
@@ -533,6 +548,7 @@ role Node {
 
     // Accepts a new Write command from a client.
     async func Write(key: string, value: string) -> ClientResponse {
+        println("HandleClientWrite: key=" + key + ", value=" + value);
         var cmd: Command = Command{ kind: 1, key: key, value: value };
         var response: chan<ClientResponse> = NewEntry(cmd);
         return <- response;
@@ -540,12 +556,14 @@ role Node {
 
     // Accepts a new Read command from a client.
     async func Read(key: string) -> ClientResponse {
+        println("HandleClientRead: key=" + key);
         // A Read is also a log entry to ensure linearizability
         var cmd: Command = Command{ kind: 0, key: key, value: nil };
         return <- NewEntry(cmd);
     }
     
     async func SimulateTimeout() {
+        println("SimulateTimeout: Node " + int_to_string(self) + " timeout triggered at view " + int_to_string(view_number));
         if (status == 2) { 
             return (); 
         }

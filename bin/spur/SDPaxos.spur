@@ -186,6 +186,17 @@ type ViewPhase enum {
     Voted(Node),
 }
 
+type PersistentState {
+    view: int;
+    view_phase: ViewPhase;
+    c_counter: int;
+    c_instances: map<Node, map<int, CInstanceState>>;
+    o_instances: map<int, OInstanceState>;
+    execution_pointer: int;
+    exec_c_next: map<Node, int>;
+    kv_store: map<string, string>;
+}
+
 role Node {
     var self: int = 0;
     var peers: list<Node> = [];
@@ -240,6 +251,42 @@ role Node {
         do_view_changes();
     }
 
+    async func RecoverInit(me: int, all: list<Node>) {
+        self = me;
+        peers = all;
+
+        for var i = 0; i < len(peers); i = i + 1 {
+            c_instances = c_instances[peers[i]] := {};
+            o_count_per_replica = o_count_per_replica[peers[i]] := 0;
+            exec_c_next = exec_c_next[peers[i]] := 0;
+        }
+
+        var saved = retrieve_data<PersistentState>();
+        if saved != nil {
+            view = saved!.view;
+            view_phase = saved!.view_phase;
+            c_counter = saved!.c_counter;
+            c_instances = saved!.c_instances;
+            o_instances = saved!.o_instances;
+            execution_pointer = saved!.execution_pointer;
+            exec_c_next = saved!.exec_c_next;
+            kv_store = saved!.kv_store;
+        }
+
+        if peers[self] == sequencer() {
+            sequencer_state = SequencerState{
+                o_counter:  0,
+                o_accept_acks: {},
+                last_o_acked_by: {},
+            };
+        }
+
+        println("Node " + int_to_string(self) + " recovered. Peer count: " + int_to_string(len(peers)));
+
+        monitor_execution();
+        do_view_changes();
+    }
+
     func is_valid(msg_view: int) -> bool {
         return msg_view >= view;
     }
@@ -271,6 +318,19 @@ role Node {
         }
     }
 
+    func save_state() {
+        persist_data(PersistentState {
+            view: view,
+            view_phase: view_phase,
+            c_counter: c_counter,
+            c_instances: c_instances,
+            o_instances: o_instances,
+            execution_pointer: execution_pointer,
+            exec_c_next: exec_c_next,
+            kv_store: kv_store
+        });
+    }
+
     async func submit(cmd: Command, response_ch: chan<Reply>) {
         var i = new_c_number();
         var view = view;
@@ -289,6 +349,8 @@ role Node {
         var accepted_by = [peers[self]];
         c_accepts = c_accepts[i] := accepted_by;
         pending_client_responses = pending_client_responses[(peers[self], i)] := response_ch;
+
+        save_state();
 
         // Now, we send a CAccept to all other replicas.
         var c_accept = CAccept{
@@ -362,6 +424,9 @@ role Node {
             value: msg.value,
         }), response_ch);
         var result = <- response_ch;
+        
+        save_state();
+
         return match result {
             Reply.ClientWriteReply(h) => h,
             _ => ClientWriteReply{
@@ -383,6 +448,9 @@ role Node {
         var response_ch: chan<Reply> = make();
         submit(Command.Read(msg.key), response_ch);
         var result = <- response_ch;
+        
+        save_state();
+        
         return match result {
             Reply.ClientReadReply(h) => h,
             _ => ClientReadReply{
@@ -428,6 +496,8 @@ role Node {
         }
 
 
+        save_state();
+
         return CAck {
             view: view,
             replica: peers[self],
@@ -446,6 +516,8 @@ role Node {
         c_instances = c_instances[msg.replica][msg.instance] := 
             CInstanceState.Committed(msg.command);
         try_execute();
+        
+        save_state();
     }   
 
     async func handle_sequencer_accept(msg: CAccept) {
@@ -529,6 +601,8 @@ role Node {
                 handle_oack_majority(msg.instance);
             }
         }
+        
+        save_state();
     }
 
     async func try_execute() {
@@ -600,6 +674,8 @@ role Node {
             exec_c_next = exec_c_next[assigned_rep!] := c_idx + 1;
             execution_pointer = execution_pointer + 1;
 
+            save_state();
+
         }
     }
 
@@ -637,6 +713,8 @@ role Node {
                 handle_oack_majority(msg.instance);
             }
         }
+        
+        save_state();
     }
 
     async func monitor_execution() { 
@@ -690,6 +768,8 @@ role Node {
 
         o_instances = o_instances[msg.instance] := OInstanceState.Committed(msg.assigned);
         try_execute();
+        
+        save_state();
     }
 
     func get_min_proposal_ballot(target: Node, instance: int) -> int {
@@ -786,6 +866,8 @@ role Node {
                 accepted_value: accepted_val
             });
         }
+        
+        save_state();
     }
 
     async func HandleCPromise(msg: CPromise) {
@@ -877,6 +959,8 @@ role Node {
                 send_c_commit(peer, c_commit);
             }
         }
+        
+        save_state();
     }
 
 
@@ -1014,6 +1098,8 @@ role Node {
             max_c_map = max_c_map[peer] := max_idx;
         }
 
+        save_state();
+
         return Vote {
             view: view,
             o_prepare_replies: o_replies,
@@ -1145,6 +1231,8 @@ role Node {
         if peers[self] != msg.sequencer {
             sequencer_state = nil;
         }
+
+        save_state();
         
         return NewViewAck { view: view, sender: peers[self] };
     }
@@ -1163,6 +1251,8 @@ role Node {
         
         println("View Sync Complete. Executing.");
         try_execute();
+        
+        save_state();
     }
 }
 
