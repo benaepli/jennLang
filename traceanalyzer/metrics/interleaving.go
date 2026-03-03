@@ -9,20 +9,20 @@ import (
 
 // InterleavingDepthStats holds per-function interleaving depth statistics.
 type InterleavingDepthStats struct {
-	FunctionName    string  `json:"function_name"`
-	Count           int     `json:"count"`
-	MinDepth        int     `json:"min_depth"`
-	MaxDepth        int     `json:"max_depth"`
-	MeanDepth       float64 `json:"mean_depth"`
-	P50Depth        int     `json:"p50_depth"`
-	P95Depth        int     `json:"p95_depth"`
+	FunctionName string  `json:"function_name"`
+	Count        int     `json:"count"`
+	MinDepth     int     `json:"min_depth"`
+	MaxDepth     int     `json:"max_depth"`
+	MeanDepth    float64 `json:"mean_depth"`
+	P50Depth     int     `json:"p50_depth"`
+	P95Depth     int     `json:"p95_depth"`
 }
 
 // OverlapStats holds same-function concurrent overlap statistics.
 type OverlapStats struct {
-	FunctionName   string  `json:"function_name"`
-	TotalPairs     int     `json:"total_pairs"`
-	OverlapCount   int     `json:"overlap_count"`
+	FunctionName    string  `json:"function_name"`
+	TotalPairs      int     `json:"total_pairs"`
+	OverlapCount    int     `json:"overlap_count"`
 	OverlapFraction float64 `json:"overlap_fraction"`
 }
 
@@ -37,9 +37,9 @@ type SchedDeltaStats struct {
 
 // InterleavingResult holds the complete interleaving analysis.
 type InterleavingResult struct {
-	Depth    []InterleavingDepthStats `json:"interleaving_depth"`
-	Overlap  []OverlapStats           `json:"concurrent_overlap"`
-	SchedDelta []SchedDeltaStats      `json:"schedulable_count_delta"`
+	Depth      []InterleavingDepthStats `json:"interleaving_depth"`
+	Overlap    []OverlapStats           `json:"concurrent_overlap"`
+	SchedDelta []SchedDeltaStats        `json:"schedulable_count_delta"`
 }
 
 // ComputeInterleaving computes concurrency and overlap metrics using DuckDB SQL.
@@ -71,18 +71,23 @@ func computeDepth(db *sql.DB, dbPath string, runID int64, result *InterleavingRe
 
 	// For each paired invocation, count trace events from OTHER nodes in [enter_step, exit_step]
 	query := fmt.Sprintf(`
-		WITH paired AS (
+		WITH latest_enter AS (
+			SELECT run_id, node_id, trace_id, function_name, step
+			FROM %[1]s
+			WHERE trace_kind = 'Enter'
+			QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id, trace_id ORDER BY step DESC) = 1
+		),
+		paired AS (
 			SELECT
 				e.run_id,
 				e.node_id,
 				e.function_name,
 				e.step AS enter_step,
 				x.step AS exit_step
-			FROM %[1]s e
+			FROM latest_enter e
 			JOIN %[1]s x
 			  ON e.run_id = x.run_id
 			  AND e.trace_id = x.trace_id
-			  AND e.trace_kind = 'Enter'
 			  AND x.trace_kind = 'Exit'
 			WHERE 1=1 %[2]s
 		),
@@ -138,18 +143,23 @@ func computeOverlap(db *sql.DB, dbPath string, runID int64, result *Interleaving
 	// For pairs of invocations of the same function on different nodes in the same run,
 	// check if their [enter_step, exit_step] ranges overlap.
 	query := fmt.Sprintf(`
-		WITH paired AS (
+		WITH latest_enter AS (
+			SELECT run_id, node_id, trace_id, function_name, step
+			FROM %[1]s
+			WHERE trace_kind = 'Enter'
+			QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id, trace_id ORDER BY step DESC) = 1
+		),
+		paired AS (
 			SELECT
 				e.run_id,
 				e.node_id,
 				e.function_name,
 				e.step AS enter_step,
 				x.step AS exit_step
-			FROM %[1]s e
+			FROM latest_enter e
 			JOIN %[1]s x
 			  ON e.run_id = x.run_id
 			  AND e.trace_id = x.trace_id
-			  AND e.trace_kind = 'Enter'
 			  AND x.trace_kind = 'Exit'
 			WHERE 1=1 %[2]s
 		),
@@ -195,15 +205,20 @@ func computeSchedDelta(db *sql.DB, dbPath string, runID int64, result *Interleav
 	filter := runIDFilter(runID)
 
 	query := fmt.Sprintf(`
-		WITH paired AS (
+		WITH latest_enter AS (
+			SELECT run_id, trace_id, function_name, schedulable_count
+			FROM %[1]s
+			WHERE trace_kind = 'Enter'
+			QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id, trace_id ORDER BY step DESC) = 1
+		),
+		paired AS (
 			SELECT
 				e.function_name,
 				x.schedulable_count - e.schedulable_count AS delta
-			FROM %[1]s e
+			FROM latest_enter e
 			JOIN %[1]s x
 			  ON e.run_id = x.run_id
 			  AND e.trace_id = x.trace_id
-			  AND e.trace_kind = 'Enter'
 			  AND x.trace_kind = 'Exit'
 			WHERE 1=1 %[2]s
 		)

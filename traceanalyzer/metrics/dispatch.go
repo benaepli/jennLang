@@ -40,16 +40,21 @@ func ComputeDispatch(dbPath string, runID int64) (*DispatchResult, error) {
 	}
 
 	query := fmt.Sprintf(`
-		WITH paired AS (
+		WITH latest_enter AS (
+			SELECT run_id, trace_id, step
+			FROM %[1]s
+			WHERE trace_kind = 'Enter'
+			QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id, trace_id ORDER BY step DESC) = 1
+		),
+		paired AS (
 			SELECT
 				d.function_name,
 				e.step - d.step AS latency
 			FROM %[1]s d
-			JOIN %[1]s e
+			JOIN latest_enter e
 			  ON d.run_id = e.run_id
 			  AND d.trace_id = e.trace_id
 			  AND d.trace_kind = 'Dispatch'
-			  AND e.trace_kind = 'Enter'
 			%[2]s
 		)
 		SELECT

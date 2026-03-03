@@ -47,15 +47,20 @@ func ComputeDuration(dbPath string, runID int64) (*DurationResult, error) {
 	}
 
 	query := fmt.Sprintf(`
-		WITH paired AS (
+		WITH latest_enter AS (
+			SELECT run_id, trace_id, function_name, step
+			FROM %[1]s
+			WHERE trace_kind = 'Enter'
+			QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id, trace_id ORDER BY step DESC) = 1
+		),
+		paired AS (
 			SELECT
 				e.function_name,
 				x.step - e.step AS duration
-			FROM %[1]s e
+			FROM latest_enter e
 			JOIN %[1]s x
 			  ON e.run_id = x.run_id
 			  AND e.trace_id = x.trace_id
-			  AND e.trace_kind = 'Enter'
 			  AND x.trace_kind = 'Exit'
 			%[2]s
 		),
