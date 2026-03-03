@@ -11,11 +11,12 @@ import (
 
 // FullReport is the top-level structure for all metrics output.
 type FullReport struct {
-	RunID        int64                      `json:"run_id"` // -1 means all runs
-	Duration     *metrics.DurationResult    `json:"duration,omitempty"`
+	RunID        int64                       `json:"run_id"` // -1 means all runs
+	Duration     *metrics.DurationResult     `json:"duration,omitempty"`
+	Dispatch     *metrics.DispatchResult     `json:"dispatch,omitempty"`
 	Interleaving *metrics.InterleavingResult `json:"interleaving,omitempty"`
-	Fault        *metrics.FaultResult       `json:"fault,omitempty"`
-	Fingerprint  *metrics.FingerprintResult `json:"fingerprint,omitempty"`
+	Fault        *metrics.FaultResult        `json:"fault,omitempty"`
+	Fingerprint  *metrics.FingerprintResult  `json:"fingerprint,omitempty"`
 }
 
 // WriteJSON writes the report as JSON to the given writer.
@@ -34,6 +35,7 @@ func WriteTable(w io.Writer, r *FullReport) {
 	}
 
 	writeDurationTable(w, r.Duration)
+	writeDispatchTable(w, r.Dispatch)
 	writeInterleavingTable(w, r.Interleaving)
 	writeFaultTable(w, r.Fault)
 	writeFingerprintTable(w, r.Fingerprint)
@@ -61,6 +63,25 @@ func writeDurationTable(w io.Writer, d *metrics.DurationResult) {
 			f.Min, f.Max, f.Mean,
 			f.P50, f.P95, f.P99,
 			flag)
+	}
+	fmt.Fprintln(w)
+}
+
+func writeDispatchTable(w io.Writer, d *metrics.DispatchResult) {
+	if d == nil || len(d.Functions) == 0 {
+		return // Silently skip if no dispatch data
+	}
+
+	fmt.Fprintf(w, "## Dispatch Queueing Latency (Enter - Dispatch)\n")
+	fmt.Fprintf(w, "%-35s %6s %8s %8s %6s %6s %6s %6s\n",
+		"Function", "Count", "Min", "Max", "Mean", "P50", "P95", "P99")
+	fmt.Fprintf(w, "%s\n", strings.Repeat("-", 90))
+
+	for _, f := range d.Functions {
+		fmt.Fprintf(w, "%-35s %6d %8d %8d %6.1f %6d %6d %6d\n",
+			truncate(f.FunctionName, 35),
+			f.Count, f.MinLatency, f.MaxLatency, f.MeanLatency,
+			f.P50Latency, f.P95Latency, f.P99Latency)
 	}
 	fmt.Fprintln(w)
 }

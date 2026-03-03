@@ -59,6 +59,13 @@ func main() {
 		log.Printf("Warning: duration metrics failed: %v", err)
 	}
 
+	// Dispatch latency metrics
+	fmt.Fprintln(os.Stderr, "  Computing dispatch metrics...")
+	r.Dispatch, err = metrics.ComputeDispatch(*inputPath, *runID)
+	if err != nil {
+		log.Printf("Warning: dispatch metrics failed: %v", err)
+	}
+
 	// Interleaving metrics
 	fmt.Fprintln(os.Stderr, "  Computing interleaving metrics...")
 	r.Interleaving, err = metrics.ComputeInterleaving(*inputPath, *runID)

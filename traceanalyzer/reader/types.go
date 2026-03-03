@@ -7,16 +7,16 @@ import (
 
 // TraceRow represents a single row from the traces table.
 type TraceRow struct {
-	RunID              int64
-	SeqNum             int64
-	NodeID             int64
-	Step               int32
-	FunctionName       string
-	TraceKind          string // "Enter" or "Exit"
-	Payload            string
-	SchedulableCount   int64
-	TraceID            int64
-	CausalOperationID  *int64 // nullable
+	RunID             int64
+	SeqNum            int64
+	NodeID            int64
+	Step              int32
+	FunctionName      string
+	TraceKind         string // "Enter" or "Exit"
+	Payload           string
+	SchedulableCount  int64
+	TraceID           int64
+	CausalOperationID *int64 // nullable
 }
 
 // ExecutionRow represents a single row from the executions table.
@@ -42,6 +42,8 @@ type Invocation struct {
 	ExitPayload        string
 	EnterSchedCount    int64
 	ExitSchedCount     int64
+	DispatchStep       *int32
+	DispatchSchedCount *int64
 	CausalOperationID  *int64
 	Unpaired           bool // true if Exit was not found
 }
@@ -62,19 +64,46 @@ func PairInvocations(rows []TraceRow) []Invocation {
 		k := key{RunID: r.RunID, TraceID: r.TraceID}
 
 		switch r.TraceKind {
-		case "Enter":
-			inv := &Invocation{
-				RunID:             r.RunID,
-				TraceID:           r.TraceID,
-				NodeID:            r.NodeID,
-				FunctionName:      r.FunctionName,
-				EnterStep:         r.Step,
-				EnterPayload:      r.Payload,
-				EnterSchedCount:   r.SchedulableCount,
-				CausalOperationID: r.CausalOperationID,
-				Unpaired:          true,
+		case "Dispatch":
+			if inv, ok := enters[k]; ok {
+				inv.DispatchStep = &r.Step
+				inv.DispatchSchedCount = &r.SchedulableCount
+			} else {
+				inv := &Invocation{
+					RunID:              r.RunID,
+					TraceID:            r.TraceID,
+					NodeID:             r.NodeID,
+					FunctionName:       r.FunctionName,
+					DispatchStep:       &r.Step,
+					DispatchSchedCount: &r.SchedulableCount,
+					CausalOperationID:  r.CausalOperationID,
+					Unpaired:           true,
+				}
+				enters[k] = inv
 			}
-			enters[k] = inv
+
+		case "Enter":
+			if inv, ok := enters[k]; ok {
+				inv.EnterStep = r.Step
+				inv.EnterPayload = r.Payload
+				inv.EnterSchedCount = r.SchedulableCount
+				if r.CausalOperationID != nil {
+					inv.CausalOperationID = r.CausalOperationID
+				}
+			} else {
+				inv := &Invocation{
+					RunID:             r.RunID,
+					TraceID:           r.TraceID,
+					NodeID:            r.NodeID,
+					FunctionName:      r.FunctionName,
+					EnterStep:         r.Step,
+					EnterPayload:      r.Payload,
+					EnterSchedCount:   r.SchedulableCount,
+					CausalOperationID: r.CausalOperationID,
+					Unpaired:          true,
+				}
+				enters[k] = inv
+			}
 
 		case "Exit":
 			if inv, ok := enters[k]; ok {

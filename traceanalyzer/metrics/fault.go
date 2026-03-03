@@ -18,7 +18,7 @@ type CrashDistanceStats struct {
 	MinDistance  int     `json:"min_distance"`
 	MaxDistance  int     `json:"max_distance"`
 	MeanDistance float64 `json:"mean_distance"`
-	CrashCount  int     `json:"crash_count"`
+	CrashCount   int     `json:"crash_count"`
 }
 
 // FunctionCrashCoverage shows the fraction of runs where a function was active during a crash.
@@ -31,8 +31,8 @@ type FunctionCrashCoverage struct {
 
 // FaultResult holds the complete fault/crash analysis.
 type FaultResult struct {
-	CrashDuringFunc []CrashDuringFunction `json:"crash_during_function"`
-	CrashDistance   *CrashDistanceStats   `json:"crash_distance"`
+	CrashDuringFunc []CrashDuringFunction   `json:"crash_during_function"`
+	CrashDistance   *CrashDistanceStats     `json:"crash_distance"`
 	CrashCoverage   []FunctionCrashCoverage `json:"crash_coverage"`
 }
 
@@ -153,7 +153,8 @@ func computeCrashDistance(db *sql.DB, dbPath string, runID int64, result *FaultR
 	// Try the LATERAL join version first; fall back to a simpler query if not supported
 	var s CrashDistanceStats
 	var meanDist sql.NullFloat64
-	err := db.QueryRow(query).Scan(&s.CrashCount, &s.MinDistance, &s.MaxDistance, &meanDist)
+	var minDist, maxDist sql.NullInt64
+	err := db.QueryRow(query).Scan(&s.CrashCount, &minDist, &maxDist, &meanDist)
 	if err != nil {
 		// Fallback: simpler approach without LATERAL
 		query = fmt.Sprintf(`
@@ -180,7 +181,7 @@ func computeCrashDistance(db *sql.DB, dbPath string, runID int64, result *FaultR
 			FROM crash_trace_dist
 		`, tSrc, eSrc, filter)
 
-		err = db.QueryRow(query).Scan(&s.CrashCount, &s.MinDistance, &s.MaxDistance, &meanDist)
+		err = db.QueryRow(query).Scan(&s.CrashCount, &minDist, &maxDist, &meanDist)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				result.CrashDistance = nil
@@ -190,6 +191,12 @@ func computeCrashDistance(db *sql.DB, dbPath string, runID int64, result *FaultR
 		}
 	}
 
+	if minDist.Valid {
+		s.MinDistance = int(minDist.Int64)
+	}
+	if maxDist.Valid {
+		s.MaxDistance = int(maxDist.Int64)
+	}
 	if meanDist.Valid {
 		s.MeanDistance = meanDist.Float64
 	}
