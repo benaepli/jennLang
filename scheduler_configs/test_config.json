@@ -32,7 +32,6 @@
     "dependency_density": [
         0.0
     ],
-    "randomly_delay_msgs": false,
     "num_runs_per_config": 1,
     "output_dir": "test_output",
     "max_iterations": 1000

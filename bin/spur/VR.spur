@@ -70,6 +70,7 @@ role Node {
     var recovery_responses: list<RecoveryResponseMsg> = [];
     var recovery_response_senders: map<Node, bool> = {};
     
+    @trace
     async func Init(me: int, peers: list<Node>) {
         self = me;
         for var i: int = 0; i < len(peers); i = i + 1 {
@@ -78,6 +79,7 @@ role Node {
         println("Node " + int_to_string(self) + " initialized. Peer count: " + int_to_string(len(peers)));
     }
 
+    @trace
     async func RecoverInit(me: int, peers: list<Node>) {
         status = 2;
         self = me;
@@ -156,6 +158,7 @@ role Node {
         }
     }
 
+    @trace
     async func Prepare(other_view: int, other_request: Command, other_op_number: int, other_commit_number: int) {
         println("HandlePrepare: Received Prepare for op_number " + int_to_string(other_op_number) + " at view " + int_to_string(other_view));
         if (other_view != view_number) { return (); }
@@ -184,6 +187,7 @@ role Node {
         }
     }
 
+    @trace
     async func PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
         println("HandlePrepareOK: Received PrepareOK for op_number " + int_to_string(other_op_number) + " at view " + int_to_string(other_view));
         var current_primary: Node = primary_of(view_number);
@@ -204,6 +208,8 @@ role Node {
             }
         }
     }
+
+    @trace
     async func Commit(other_view: int, other_commit_number: int) {
         println("HandleCommit: Committing up to op_number " + int_to_string(other_commit_number) + " at view " + int_to_string(other_view));
         if (other_view == view_number and status == 0 and other_commit_number > commit_number) {
@@ -271,6 +277,7 @@ role Node {
         apply_committed_entries();
     }
 
+    @trace
     async func StartViewChange(new_view: int, replica_id: Node) {
         println("HandleStartViewChange: Node " + int_to_string(self) + " received StartViewChange for view " + int_to_string(new_view));
         if (status == 2) {
@@ -302,6 +309,7 @@ role Node {
         }
     }
 
+    @trace
     async func DoViewChange(new_view: int, sender_log: list<LogEntry>, sender_normal_view: int, sender_op_number: int, sender_commit_number: int, sender_id: Node) {
         var current_primary: Node = primary_of(new_view);
         
@@ -352,6 +360,7 @@ role Node {
         }
     }
 
+    @trace
     async func StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
         println("HandleStartView: Installing view " + int_to_string(new_view) + " with op_number " + int_to_string(new_op_number) + " commit_number " + int_to_string(new_commit_number));
         if (status == 2) {
@@ -368,6 +377,7 @@ role Node {
         }
     }
 
+    @trace
     async func Recovery(replica_id: Node, nonce: int, checkpoint_op: int) {
         println("HandleRecovery: Received Recovery request for nonce " + int_to_string(nonce) + " checkpoint_op " + int_to_string(checkpoint_op));
         // Only respond if status is normal
@@ -395,6 +405,7 @@ role Node {
         }
     }
 
+    @trace
     async func RecoveryResponse(other_view: int, other_nonce: int, other_log: list<LogEntry>?, other_op_number: int?, other_commit_number: int?, sender_id: Node) {
         println("HandleRecoveryResponse: Received RecoveryResponse for nonce " + int_to_string(other_nonce) + " at view " + int_to_string(other_view));
         if (status != 2) {

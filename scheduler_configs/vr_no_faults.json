@@ -27,7 +27,6 @@
     "dependency_density": [
         0.3
     ],
-    "randomly_delay_msgs": true,
     "num_runs_per_config": 5,
     "max_iterations": 5000
 }

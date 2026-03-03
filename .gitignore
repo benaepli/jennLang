@@ -11,3 +11,4 @@ output*.html
 output/
 output.db
 target
+perf.data
