@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/benaepli/jennlang-traceanalyzer/reader"
+	"github.com/benaepli/turnpike-traceanalyzer/reader"
 )
 
 // FunctionDurationStats holds per-function duration statistics.

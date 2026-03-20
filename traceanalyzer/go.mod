@@ -1,4 +1,4 @@
-module github.com/benaepli/jennlang-traceanalyzer
+module github.com/benaepli/turnpike-traceanalyzer
 
 go 1.24.9
 

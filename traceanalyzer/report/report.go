@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/benaepli/jennlang-traceanalyzer/metrics"
+	"github.com/benaepli/turnpike-traceanalyzer/metrics"
 )
 
 // FullReport is the top-level structure for all metrics output.

@@ -4,24 +4,24 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/benaepli/jennlang-traceanalyzer/reader"
+	"github.com/benaepli/turnpike-traceanalyzer/reader"
 )
 
 // FingerprintResult holds the complete exploration diversity analysis.
 type FingerprintResult struct {
-	TotalRuns          int     `json:"total_runs"`
-	UniqueFingerprints int     `json:"unique_fingerprints"`
-	DiversityRatio     float64 `json:"diversity_ratio"`
-	UniqueNodeProfiles int     `json:"unique_node_profiles"`
+	TotalRuns          int                    `json:"total_runs"`
+	UniqueFingerprints int                    `json:"unique_fingerprints"`
+	DiversityRatio     float64                `json:"diversity_ratio"`
+	UniqueNodeProfiles int                    `json:"unique_node_profiles"`
 	CausalChains       []CausalChainDiversity `json:"causal_chains,omitempty"`
 }
 
 // CausalChainDiversity shows how many distinct causal operation ID sequences
 // appear per function across runs.
 type CausalChainDiversity struct {
-	FunctionName       string `json:"function_name"`
-	DistinctChains     int    `json:"distinct_chains"`
-	TotalInvocations   int    `json:"total_invocations"`
+	FunctionName     string `json:"function_name"`
+	DistinctChains   int    `json:"distinct_chains"`
+	TotalInvocations int    `json:"total_invocations"`
 }
 
 // ComputeFingerprint computes exploration diversity metrics using DuckDB SQL.

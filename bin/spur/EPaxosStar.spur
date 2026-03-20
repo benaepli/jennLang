@@ -162,7 +162,7 @@ role Node {
     }
 
     func depsToString(deps: DependencySet) -> string {
-        var s: string = "{";
+        var s: string = "\{";
         var first: bool = true;
         for (id, _) in deps {
             if (!first) {

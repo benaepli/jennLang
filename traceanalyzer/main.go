@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/benaepli/jennlang-traceanalyzer/metrics"
-	"github.com/benaepli/jennlang-traceanalyzer/reader"
-	"github.com/benaepli/jennlang-traceanalyzer/report"
+	"github.com/benaepli/turnpike-traceanalyzer/metrics"
+	"github.com/benaepli/turnpike-traceanalyzer/reader"
+	"github.com/benaepli/turnpike-traceanalyzer/report"
 )
 
 func main() {

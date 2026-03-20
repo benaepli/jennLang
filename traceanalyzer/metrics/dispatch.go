@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/benaepli/jennlang-traceanalyzer/reader"
+	"github.com/benaepli/turnpike-traceanalyzer/reader"
 )
 
 // DispatchFunctionStats holds dispatch latency statistics for a single function.

@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/benaepli/jennlang-traceanalyzer/reader"
+	"github.com/benaepli/turnpike-traceanalyzer/reader"
 )
 
 // CrashDuringFunction shows which functions were active when a crash occurred.
