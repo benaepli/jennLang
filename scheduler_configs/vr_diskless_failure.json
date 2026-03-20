@@ -1,0 +1,22 @@
+{
+  "num_servers": 3,
+  "num_runs": 1000000,
+  "max_iterations": 1000,
+  "events": {
+    "timeout_nl": { "timeout": 1 },
+    "crash_nl": { "crash": 1 },
+    "recover_nl": { "recover": 1 },
+    "crash_n2": { "crash": 2 },
+    "recover_n2": { "recover": 2 },
+    "write_ol": { "write": [0, "key1", "val1"] },
+    "read_o2": { "read": [0, "key1"]  }
+  },
+  "dependencies": [
+    ["timeout_nl", "crash_nl"],
+    ["crash_nl", "recover_nl"],
+    ["recover_nl", "crash_n2"],
+    ["crash_n2", "recover_n2"],
+    ["recover_n2", "write_ol"],
+    ["write_o1", "read_o2"]
+  ]
+}

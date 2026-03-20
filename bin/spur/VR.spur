@@ -70,6 +70,8 @@ role Node {
     var recovery_responses: list<RecoveryResponseMsg> = [];
     var recovery_response_senders: map<Node, bool> = {};
     
+    var received_primary_message: bool = false;
+    
     @trace
     async func Init(me: int, peers: list<Node>) {
         self = me;
@@ -77,6 +79,7 @@ role Node {
             replicas = append(replicas, peers[i]);
         }
         println("Node " + int_to_string(self) + " initialized. Peer count: " + int_to_string(len(peers)));
+        monitor_timeouts();
     }
 
     @trace
@@ -101,6 +104,7 @@ role Node {
                 replicas[i]->Recovery(replicas[self], recovery_nonce, checkpoint_op);
             }
         }
+        monitor_timeouts();
     }
 
     // Async helper to resolve channels from functions
@@ -160,6 +164,7 @@ role Node {
 
     @trace
     async func Prepare(other_view: int, other_request: Command, other_op_number: int, other_commit_number: int) {
+        received_primary_message = true;
         println("HandlePrepare: Received Prepare for op_number " + int_to_string(other_op_number) + " at view " + int_to_string(other_view));
         if (other_view != view_number) { return (); }
         if (status != 0) { return (); }
@@ -193,7 +198,8 @@ role Node {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] == current_primary and other_view == view_number and status == 0) {
             if (!exists(prepare_ok_counts, other_op_number)) {
-                prepare_ok_counts = prepare_ok_counts[other_op_number] := 0;
+                // Start at 1: the primary counts itself as having prepared the op.
+                prepare_ok_counts = prepare_ok_counts[other_op_number] := 1;
             }
             prepare_ok_counts = prepare_ok_counts[other_op_number] := prepare_ok_counts[other_op_number] + 1;
             var quorum: int = f() + 1;
@@ -211,6 +217,7 @@ role Node {
 
     @trace
     async func Commit(other_view: int, other_commit_number: int) {
+        received_primary_message = true;
         println("HandleCommit: Committing up to op_number " + int_to_string(other_commit_number) + " at view " + int_to_string(other_view));
         if (other_view == view_number and status == 0 and other_commit_number > commit_number) {
             commit_number = other_commit_number;
@@ -362,6 +369,7 @@ role Node {
 
     @trace
     async func StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
+        received_primary_message = true;
         println("HandleStartView: Installing view " + int_to_string(new_view) + " with op_number " + int_to_string(new_op_number) + " commit_number " + int_to_string(new_commit_number));
         if (status == 2) {
             return ();
@@ -477,6 +485,8 @@ role Node {
         commit_number = p_resp.commit_number!;
         op_number = p_resp.op_number!;
 
+        normal_view = view_number;
+
         // Reconstruct the log: our local prefix + primary's suffix
         var new_log: list<LogEntry> = [];
         for var i = 0; i < applied_op_count; i = i + 1 {
@@ -491,6 +501,7 @@ role Node {
 
         println("Node " + int_to_string(self) + " recovery complete. view=" + int_to_string(view_number) + " op_number=" + int_to_string(op_number) + " commit_number=" + int_to_string(commit_number));
         status = 0;
+        received_primary_message = true;
 
         recovery_responses = [];
         recovery_response_senders = {};
@@ -535,7 +546,8 @@ role Node {
 
         op_number = op_number + 1;
         log = append(log, LogEntry{view: view_number, op: cmd});
-        prepare_ok_counts = prepare_ok_counts[op_number] := 0;
+        // Start at 1: the primary counts itself as having prepared the op.
+        prepare_ok_counts = prepare_ok_counts[op_number] := 1;
 
         // Create a promise for the client to await commitment
         var p: chan<ClientResponse> = make();
@@ -581,6 +593,34 @@ role Node {
 
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) { 
+            enter_view_change(view_number + 1);
+            for var i = 0; i < len(replicas); i = i + 1 {
+                 if (i != self) {
+                    replicas[i]->StartViewChange(view_number, replicas[self]);
+                 }
+            }
+        }
+    }
+
+    async func monitor_timeouts() {
+        for ;; {
+            <- set_timer();
+
+            if (status == 2) { 
+                continue; 
+            }
+
+            var current_primary: Node = primary_of(view_number);
+            if (replicas[self] == current_primary) { 
+                continue;
+            }
+
+            if (received_primary_message) {
+                received_primary_message = false;
+                continue;
+            }
+
+            println("monitor_timeouts: Node " + int_to_string(self) + " timeout triggered at view " + int_to_string(view_number));
             enter_view_change(view_number + 1);
             for var i = 0; i < len(replicas); i = i + 1 {
                  if (i != self) {
