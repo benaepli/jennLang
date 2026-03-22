@@ -62,6 +62,7 @@ var result: Response = <- result_chan;   // blocks until response
 
 - **sync** (default): blocking, atomic, cannot use channel ops
 - **async**: returns `chan<T>` immediately, caller must `<-` to get result
+- Calling an async function **spawns a new background task** (record). If you don't await the returned channel, the task runs concurrently in the background while the caller continues. This is how you spawn background work like timeout monitors or replication handlers.
 
 ### Immutable Updates (`:=`)
 
