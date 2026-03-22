@@ -202,7 +202,7 @@ role Node {
                 prepare_ok_counts = prepare_ok_counts[other_op_number] := 1;
             }
             prepare_ok_counts = prepare_ok_counts[other_op_number] := prepare_ok_counts[other_op_number] + 1;
-            var quorum: int = f() + 1;
+            var quorum: int = len(replicas) / 2 + 1;
             if (prepare_ok_counts[other_op_number] >= quorum and other_op_number > commit_number) {
                 commit_number = other_op_number;
                 apply_committed_entries();
@@ -304,8 +304,7 @@ role Node {
             }
             start_view_change_senders = start_view_change_senders[replica_id] := true;
             
-            var f_val: int = (len(replicas) - 1) / 2;
-            var quorum: int = f_val + 1;
+            var quorum: int = len(replicas) / 2 + 1;
 
             if (len(start_view_change_senders) == quorum) {
                 var new_primary: Node = primary_of(view_number);
@@ -334,8 +333,8 @@ role Node {
                 commit_number: sender_commit_number
             });
 
-            var quorum: int = f() + 1;
-            
+            var quorum: int = len(replicas) / 2 + 1;
+
             if (len(do_view_change_senders) == quorum) {
                 println("DoViewChange: Majority achieved. Becoming primary for view " + int_to_string(new_view));
                 
@@ -359,7 +358,7 @@ role Node {
                         max_commit_number = msg.commit_number;
                     }
                 }
-                enter_normal_mode(new_view, best_log, best_op_number, max_commit_number);
+                enter_normal_mode(new_view, best_log, best_op_number, min(max_commit_number, best_op_number));
                 for var i = 0; i < len(replicas); i = i + 1 {
                     replicas[i]->StartView(view_number, log, op_number, commit_number);
                 }
@@ -440,7 +439,7 @@ role Node {
         });
 
         // Check if we have a quorum of f+1 responses
-        var quorum: int = f() + 1;
+        var quorum: int = len(replicas) / 2 + 1;
         if (len(recovery_response_senders) < quorum) {
             return (); // Not enough responses yet
         }

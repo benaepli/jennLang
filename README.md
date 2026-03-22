@@ -25,7 +25,7 @@ Spur is a domain-specific language for specifying distributed protocols. The `ex
 **Basic usage:**
 
 ```bash
-RUST_LOG=info cargo run --release --manifest-path spur/Cargo.toml -- explore \
+RUST_LOG=info cargo run --release --manifest-path spur/Cargo.toml --bin spur -- explore \
   -e standard \
   --config scheduler_configs/vr_comprehensive.json \
   --output-dir output \

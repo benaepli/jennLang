@@ -7,7 +7,7 @@ The Spur simulator is highly configurable via CLI flags and JSON configuration f
 The primary entry point operates via subcommands on the main `spur` cargo project:
 
 ```bash
-cargo run --release --manifest-path spur/Cargo.toml -- [SUBCOMMAND] [OPTIONS...]
+cargo run --release --manifest-path spur/Cargo.toml --bin spur -- [SUBCOMMAND] [OPTIONS...]
 ```
 
 ### `explore`
