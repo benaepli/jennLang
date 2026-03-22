@@ -227,7 +227,7 @@ role Node {
     // Track if we heard from the sequencer recently
     var received_sequencer_message: bool = false;
 
-    async func Init(me: int, all: list<Node>) {
+    async fn Init(me: int, all: list<Node>) {
         self = me;
         peers = all;
 
@@ -251,7 +251,7 @@ role Node {
         do_view_changes();
     }
 
-    async func RecoverInit(me: int, all: list<Node>) {
+    async fn RecoverInit(me: int, all: list<Node>) {
         self = me;
         peers = all;
 
@@ -287,38 +287,38 @@ role Node {
         do_view_changes();
     }
 
-    func is_valid(msg_view: int) -> bool {
+    fn is_valid(msg_view: int): bool {
         return msg_view >= view;
     }
 
-    func new_c_number() -> int {
+    fn new_c_number(): int {
         var current = c_counter;
         c_counter = c_counter + 1;
         return current;
     }
 
-    func new_o_number() -> int {
+    fn new_o_number(): int {
         var counter = sequencer_state!.o_counter;
         sequencer_state = sequencer_state!.o_counter := counter + 1;
         return counter;
     }
 
-    func majority() -> int {
+    fn majority(): int {
         return len(peers) / 2 + 1;
     }
 
-    func sequencer() -> Node {
+    fn sequencer(): Node {
         return peers[view % len(peers)];
     }
 
-    func handle_new_view(new_view: int) {
+    fn handle_new_view(new_view: int) {
         if new_view > view {
             view = new_view;
             view_phase = ViewPhase.Normal;
         }
     }
 
-    func save_state() {
+    fn save_state() {
         persist_data(PersistentState {
             view: view,
             view_phase: view_phase,
@@ -331,7 +331,7 @@ role Node {
         });
     }
 
-    async func submit(cmd: Command, response_ch: chan<Reply>) {
+    async fn submit(cmd: Command, response_ch: chan<Reply>) {
         var i = new_c_number();
         var view = view;
         var ballot = Ballot{
@@ -398,18 +398,18 @@ role Node {
 
     }
 
-    async func send_c_accept(peer: Node, msg: CAccept, response_ch: chan<CAck>) {
+    async fn send_c_accept(peer: Node, msg: CAccept, response_ch: chan<CAck>) {
         var resp = <-peer->HandleCAccept(msg);
         if resp != nil {
             send(response_ch, resp!);
         }
     }
 
-    async func send_c_commit(peer: Node, msg: CCommit) {
+    async fn send_c_commit(peer: Node, msg: CCommit) {
         peer->HandleCCommit(msg);
     }
 
-    async func HandleClientWrite(msg: ClientWrite) -> ClientWriteReply {
+    async fn HandleClientWrite(msg: ClientWrite): ClientWriteReply {
         if view_phase != ViewPhase.Normal {
             return ClientWriteReply{
                 success: false,
@@ -435,7 +435,7 @@ role Node {
         }
     }
 
-    async func HandleClientRead(msg: ClientRead) -> ClientReadReply {
+    async fn HandleClientRead(msg: ClientRead): ClientReadReply {
         if view_phase != ViewPhase.Normal {
             return ClientReadReply {
                 success: false,
@@ -460,7 +460,7 @@ role Node {
         }
     }
 
-    async func HandleCAccept(msg: CAccept) -> CAck? {
+    async fn HandleCAccept(msg: CAccept): CAck? {
         println("HandleCAccept: Received CAccept for instance (" + role_to_string(msg.replica) + ", " + int_to_string(msg.instance) + ") at view " + int_to_string(msg.view));
         if !is_valid(msg.view) {
             return nil;
@@ -506,7 +506,7 @@ role Node {
         };
     }
 
-    async func HandleCCommit(msg: CCommit) {
+    async fn HandleCCommit(msg: CCommit) {
         println("HandleCCommit: Committing C-instance (" + role_to_string(msg.replica) + ", " + int_to_string(msg.instance) + ") at view " + int_to_string(msg.view));
         if !is_valid(msg.view) {
             return;
@@ -520,7 +520,7 @@ role Node {
         save_state();
     }   
 
-    async func handle_sequencer_accept(msg: CAccept) {
+    async fn handle_sequencer_accept(msg: CAccept) {
         if sequencer_state == nil {
             return;
         }
@@ -557,7 +557,7 @@ role Node {
         }
     }
 
-    async func HandleOAccept(msg: OAccept) {
+    async fn HandleOAccept(msg: OAccept) {
         println("HandleOAccept: Received OAccept for instance " + int_to_string(msg.instance) + " at view " + int_to_string(msg.view));
         if !is_valid(msg.view) {
             return;
@@ -605,7 +605,7 @@ role Node {
         save_state();
     }
 
-    async func try_execute() {
+    async fn try_execute() {
         for ;; {
             // First, we check whether the O-instance is committed
             if !exists(o_instances, execution_pointer) {
@@ -679,7 +679,7 @@ role Node {
         }
     }
 
-    func log_execution(assigned_rep: Node, c_idx: int, cmd: Command) {
+    fn log_execution(assigned_rep: Node, c_idx: int, cmd: Command) {
         var rep_str = role_to_string(assigned_rep);
         match cmd {
             Command.Read(key) => {
@@ -694,7 +694,7 @@ role Node {
         };
     }
 
-    async func HandleOAck(msg: OAck) {
+    async fn HandleOAck(msg: OAck) {
         if !is_valid(msg.view) {
             return;
         }
@@ -717,7 +717,7 @@ role Node {
         save_state();
     }
 
-    async func monitor_execution() { 
+    async fn monitor_execution() { 
         for ;; {
             <- set_timer();
             if !exists(o_instances, execution_pointer) {
@@ -747,7 +747,7 @@ role Node {
         }
     }
 
-    async func do_view_changes() {
+    async fn do_view_changes() {
         for ;; {
             <- set_timer();
             
@@ -759,7 +759,7 @@ role Node {
         }
     }
 
-    async func HandleOCommit(msg: OCommit) {
+    async fn HandleOCommit(msg: OCommit) {
         println("HandleOCommit: Committing O-instance " + int_to_string(msg.instance) + " at view " + int_to_string(msg.view));
         if !is_valid(msg.view) {
             return;
@@ -772,7 +772,7 @@ role Node {
         save_state();
     }
 
-    func get_min_proposal_ballot(target: Node, instance: int) -> int {
+    fn get_min_proposal_ballot(target: Node, instance: int): int {
         if !exists(c_instances, target) {
             return 0;
         }
@@ -787,7 +787,7 @@ role Node {
         };
     }
 
-    func start_c_recovery(target: Node, instance: int) { 
+    fn start_c_recovery(target: Node, instance: int) { 
         var highest_seen_round = get_min_proposal_ballot(target, instance);
         var this_round = highest_seen_round + 1;
 
@@ -809,7 +809,7 @@ role Node {
         }
     }
 
-    async func HandleCPrepare(msg: CPrepare) {
+    async fn HandleCPrepare(msg: CPrepare) {
         println("HandleCPrepare: Received CPrepare for instance (" + role_to_string(msg.target) + ", " + int_to_string(msg.instance) + ") at round " + int_to_string(msg.ballot.round));
         if !is_valid(msg.view) { return; }
         
@@ -870,7 +870,7 @@ role Node {
         save_state();
     }
 
-    async func HandleCPromise(msg: CPromise) {
+    async fn HandleCPromise(msg: CPromise) {
         if !is_valid(msg.view) { return; }
 
         var key = (msg.target_node, msg.instance);
@@ -964,7 +964,7 @@ role Node {
     }
 
 
-    func get_o_ballot(instance: int) -> Ballot {
+    fn get_o_ballot(instance: int): Ballot {
         return match o_instances[instance] {
             OInstanceState.Promised(b) => b,
             OInstanceState.Accepted(args) => args.accepted,
@@ -975,7 +975,7 @@ role Node {
         }
     }
 
-    func handle_oack_majority(instance: int) {
+    fn handle_oack_majority(instance: int) {
         if !exists(o_instances, instance) {
             return; 
         }
@@ -998,7 +998,7 @@ role Node {
         }
     }
 
-    async func start_view_change() {
+    async fn start_view_change() {
         view = view + 1;
         view_phase = ViewPhase.Candidate;
 
@@ -1033,14 +1033,14 @@ role Node {
         }
     }
 
-    async func send_v_request(peer: Node, msg: VRequest, ch: chan<(Node, Vote)>) {
+    async fn send_v_request(peer: Node, msg: VRequest, ch: chan<(Node, Vote)>) {
         var resp = <- peer->HandleVRequest(msg);
         if resp != nil {
             send(ch, (peer, resp!));
         }
     }
 
-    async func HandleVRequest(msg: VRequest) -> Vote? {
+    async fn HandleVRequest(msg: VRequest): Vote? {
         if msg.new_view < view {
             return nil;
         }
@@ -1107,7 +1107,7 @@ role Node {
         };
     }
 
-    async func become_sequencer(votes: map<Node, Vote>) {
+    async fn become_sequencer(votes: map<Node, Vote>) {
         println("Reconstructing Log from " + int_to_string(len(votes)) + " votes...");
         var candidates: map<int, (Ballot, Node)> = {};
         var max_o_index = -1;
@@ -1191,14 +1191,14 @@ role Node {
         view_phase = ViewPhase.Normal;
     }
 
-    async func send_new_view_and_wait(peer: Node, msg: NewView, ch: chan<NewViewAck>) {
+    async fn send_new_view_and_wait(peer: Node, msg: NewView, ch: chan<NewViewAck>) {
         var resp = <- peer->HandleNewView(msg);
         if resp != nil {
             send(ch, resp!);
         }
     }
 
-    async func HandleNewView(msg: NewView) -> NewViewAck? {
+    async fn HandleNewView(msg: NewView): NewViewAck? {
         if msg.view < view {
             return nil;
         }
@@ -1237,7 +1237,7 @@ role Node {
         return NewViewAck { view: view, sender: peers[self] };
     }
 
-    async func HandleNewViewCommit(msg: NewViewCommit) {
+    async fn HandleNewViewCommit(msg: NewViewCommit) {
         if msg.view < view { return; }
         
         for (idx, state) in o_instances {
@@ -1257,7 +1257,7 @@ role Node {
 }
 
 ClientInterface {
-    async func Write(dest: Node, key: string, value: string) {
+    async fn Write(dest: Node, key: string, value: string) {
         for ;; {
             var resp: ClientWriteReply = <- dest->HandleClientWrite(ClientWrite{key: key, value: value});
             if (resp.success == true) {
@@ -1266,7 +1266,7 @@ ClientInterface {
         }
     }
 
-    async func Read(dest: Node, key: string) -> string? {
+    async fn Read(dest: Node, key: string): string? {
         for ;; {
             var resp: ClientReadReply = <- dest->HandleClientRead(ClientRead{key: key});
             if (resp.success == true) {

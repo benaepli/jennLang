@@ -14,7 +14,7 @@ role Node {
     
     var inFailover: bool = false;
 
-    async func Read(key: string) -> string? {
+    async fn Read(key: string): string? {
         if (inFailover == true) {
             spin_await (inFailover == false);
         }
@@ -37,7 +37,7 @@ role Node {
         }
     }
 
-    async func Write(key: string, value: string) -> () {
+    async fn Write(key: string, value: string): () {
         if (inFailover == true) {
             spin_await (inFailover == false);
         }
@@ -79,7 +79,7 @@ role Node {
         }
     }
     
-    async func AckWrite(key: string, value: string) -> () {
+    async fn AckWrite(key: string, value: string): () {
         if (inFailover == true) {
             spin_await (inFailover == false);
         }
@@ -87,7 +87,7 @@ role Node {
         is_committed[key] = true;
     }
     
-    async func TriggerFailover(failed_node: Node, new_tail: Node) -> () {
+    async fn TriggerFailover(failed_node: Node, new_tail: Node): () {
         inFailover = true;
         
         if (failed_node == successor) {
@@ -125,14 +125,14 @@ role Node {
         }
     }
 
-    async func EndFailover() -> () {
+    async fn EndFailover(): () {
         inFailover = false;
     }
 
 
-    async func Init(assigned_role: string, pred: Node?, pred_pred: Node?, 
+    async fn Init(assigned_role: string, pred: Node?, pred_pred: Node?, 
               succ: Node?, succ_succ: Node?, h: Node?, t: Node?, 
-              s_node: Node?, data: map<string, string>) -> () {
+              s_node: Node?, data: map<string, string>): () {
         
         r = assigned_role;
         predecessor = pred;
@@ -155,7 +155,7 @@ role Node {
     }
 
     // Receiving dirty logs from new predecessor
-    async func PropagateDirtyLogs(dirty_logs: map<string, string>) -> () {
+    async fn PropagateDirtyLogs(dirty_logs: map<string, string>): () {
         var diff_dirty_logs: map<string, string> = {}; // Unused in original
         for ((key, value) in dirty_logs) {
             // Check for existence and mismatch
@@ -172,7 +172,7 @@ role Node {
     }
 
     // Receiving clean logs from new successor
-    async func BackPropagateCleanLogs(clean_logs: map<string, string>) -> () {
+    async fn BackPropagateCleanLogs(clean_logs: map<string, string>): () {
         var diff_clean_logs: map<string, string> = {}; // Unused in original
         for ((key, value) in clean_logs) {
             // Check for existence and mismatch
@@ -188,7 +188,7 @@ role Node {
     }
     
     // New tail receiving full state from old tail
-    async func PropagateLogsToTail(other_db: map<string, string>) -> () {
+    async fn PropagateLogsToTail(other_db: map<string, string>): () {
         r = "Tail";
         for ((key, value) in other_db) {
             db[key] = value;
@@ -200,28 +200,28 @@ role Node {
 
 ClientInterface { 
     
-    async func read(dest: Node, key: string) -> string? {
+    async fn read(dest: Node, key: string): string? {
         // Client awaits the result of the read
         var val: string? = @rpc_call(dest, Read(key));
         return val;
     }
 
-    async func write(dest: Node, key: string, val: string) -> () {
+    async fn write(dest: Node, key: string, val: string): () {
         // Client awaits the write to complete
         @rpc_call(dest, Write(key, val));
     }
 
-    async func triggerFailover(dest: Node, failed_node: Node, new_tail: Node) -> () {
+    async fn triggerFailover(dest: Node, failed_node: Node, new_tail: Node): () {
         @rpc_call(dest, TriggerFailover(failed_node, new_tail));
     }
 
-    async func endFailover(dest: Node) -> () {
+    async fn endFailover(dest: Node): () {
         @rpc_call(dest, EndFailover());
     }
 
-    async func init(dest: Node, name: string, pred: Node?, pred_pred: Node?, 
+    async fn init(dest: Node, name: string, pred: Node?, pred_pred: Node?, 
               succ: Node?, succ_succ: Node?, hd: Node?, tl: Node?, 
-              s_node: Node?, data: map<string, string>) -> () {
+              s_node: Node?, data: map<string, string>): () {
         
         @rpc_call(dest, Init(name, pred, pred_pred, succ, succ_succ, hd, tl, s_node, data));
     }

@@ -73,7 +73,7 @@ role Node {
     var received_primary_message: bool = false;
     
     @trace
-    async func Init(me: int, peers: list<Node>) {
+    async fn Init(me: int, peers: list<Node>) {
         self = me;
         for var i: int = 0; i < len(peers); i = i + 1 {
             replicas = append(replicas, peers[i]);
@@ -83,7 +83,7 @@ role Node {
     }
 
     @trace
-    async func RecoverInit(me: int, peers: list<Node>) {
+    async fn RecoverInit(me: int, peers: list<Node>) {
         status = 2;
         self = me;
         for var i: int = 0; i < len(peers); i = i + 1 {
@@ -108,22 +108,22 @@ role Node {
     }
 
     // Async helper to resolve channels from functions
-    async func send_async(ch: chan<ClientResponse>, resp: ClientResponse) {
+    async fn send_async(ch: chan<ClientResponse>, resp: ClientResponse) {
         send(ch, resp);
     }
 
-    func primary_of(v: int) -> Node {
+    fn primary_of(v: int): Node {
         var num_servers: int = len(replicas);
         return replicas[v % num_servers];
     }
     
-    func f() -> int {
+    fn f(): int {
         var num_servers: int = len(replicas);
         return (num_servers - 1) / 2;
     }
 
     // Applies committed entries to the KV store
-    func apply_committed_entries() {
+    fn apply_committed_entries() {
         for ; applied_op_count < commit_number and applied_op_count < len(log) ; {
             var i: int = applied_op_count;
             var op_n: int = i + 1;
@@ -163,7 +163,7 @@ role Node {
     }
 
     @trace
-    async func Prepare(other_view: int, other_request: Command, other_op_number: int, other_commit_number: int) {
+    async fn Prepare(other_view: int, other_request: Command, other_op_number: int, other_commit_number: int) {
         received_primary_message = true;
         println("HandlePrepare: Received Prepare for op_number " + int_to_string(other_op_number) + " at view " + int_to_string(other_view));
         if (other_view != view_number) { return (); }
@@ -193,7 +193,7 @@ role Node {
     }
 
     @trace
-    async func PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
+    async fn PrepareOK(other_view: int, other_op_number: int, other_replica_id: Node) {
         println("HandlePrepareOK: Received PrepareOK for op_number " + int_to_string(other_op_number) + " at view " + int_to_string(other_view));
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] == current_primary and other_view == view_number and status == 0) {
@@ -216,7 +216,7 @@ role Node {
     }
 
     @trace
-    async func Commit(other_view: int, other_commit_number: int) {
+    async fn Commit(other_view: int, other_commit_number: int) {
         received_primary_message = true;
         println("HandleCommit: Committing up to op_number " + int_to_string(other_commit_number) + " at view " + int_to_string(other_view));
         if (other_view == view_number and status == 0 and other_commit_number > commit_number) {
@@ -225,7 +225,7 @@ role Node {
         }
     }
 
-    func enter_view_change(new_view: int) {
+    fn enter_view_change(new_view: int) {
         println("Node " + int_to_string(self) + " entering view change to view " + int_to_string(new_view));
         status = 1;
         view_number = new_view;
@@ -253,7 +253,7 @@ role Node {
         prepare_buffer = {};
     }
 
-    func enter_normal_mode(v: int, new_log: list<LogEntry>, op_n: int, commit_n: int) {
+    fn enter_normal_mode(v: int, new_log: list<LogEntry>, op_n: int, commit_n: int) {
         println("Node " + int_to_string(self) + " entering normal mode at view " + int_to_string(v) + " with op_number " + int_to_string(op_n) + " commit_number " + int_to_string(commit_n));
         status = 0;
         view_number = v;
@@ -285,7 +285,7 @@ role Node {
     }
 
     @trace
-    async func StartViewChange(new_view: int, replica_id: Node) {
+    async fn StartViewChange(new_view: int, replica_id: Node) {
         println("HandleStartViewChange: Node " + int_to_string(self) + " received StartViewChange for view " + int_to_string(new_view));
         if (status == 2) {
             return ();
@@ -317,7 +317,7 @@ role Node {
     }
 
     @trace
-    async func DoViewChange(new_view: int, sender_log: list<LogEntry>, sender_normal_view: int, sender_op_number: int, sender_commit_number: int, sender_id: Node) {
+    async fn DoViewChange(new_view: int, sender_log: list<LogEntry>, sender_normal_view: int, sender_op_number: int, sender_commit_number: int, sender_id: Node) {
         var current_primary: Node = primary_of(new_view);
         
         if (replicas[self] == current_primary and new_view == view_number and status == 1) {
@@ -368,7 +368,7 @@ role Node {
     }
 
     @trace
-    async func StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
+    async fn StartView(new_view: int, new_log: list<LogEntry>, new_op_number: int, new_commit_number: int) {
         received_primary_message = true;
         println("HandleStartView: Installing view " + int_to_string(new_view) + " with op_number " + int_to_string(new_op_number) + " commit_number " + int_to_string(new_commit_number));
         if (status == 2) {
@@ -386,7 +386,7 @@ role Node {
     }
 
     @trace
-    async func Recovery(replica_id: Node, nonce: int, checkpoint_op: int) {
+    async fn Recovery(replica_id: Node, nonce: int, checkpoint_op: int) {
         println("HandleRecovery: Received Recovery request for nonce " + int_to_string(nonce) + " checkpoint_op " + int_to_string(checkpoint_op));
         // Only respond if status is normal
         if (status != 0) {
@@ -414,7 +414,7 @@ role Node {
     }
 
     @trace
-    async func RecoveryResponse(other_view: int, other_nonce: int, other_log: list<LogEntry>?, other_op_number: int?, other_commit_number: int?, sender_id: Node) {
+    async fn RecoveryResponse(other_view: int, other_nonce: int, other_log: list<LogEntry>?, other_op_number: int?, other_commit_number: int?, sender_id: Node) {
         println("HandleRecoveryResponse: Received RecoveryResponse for nonce " + int_to_string(other_nonce) + " at view " + int_to_string(other_view));
         if (status != 2) {
             return ();
@@ -518,7 +518,7 @@ role Node {
     }
 
     // Accepts a new command, logs it, and starts the replication process.
-    func NewEntry(cmd: Command) -> chan<ClientResponse> {
+    fn NewEntry(cmd: Command): chan<ClientResponse> {
         var current_primary: Node = primary_of(view_number);
         if (replicas[self] != current_primary) {
             // Not the primary. Return a failure/redirect response.
@@ -570,7 +570,7 @@ role Node {
     }
 
     // Accepts a new Write command from a client.
-    async func Write(key: string, value: string) -> ClientResponse {
+    async fn Write(key: string, value: string): ClientResponse {
         println("HandleClientWrite: key=" + key + ", value=" + value);
         var cmd: Command = Command{ kind: 1, key: key, value: value };
         var response: chan<ClientResponse> = NewEntry(cmd);
@@ -578,14 +578,14 @@ role Node {
     }
 
     // Accepts a new Read command from a client.
-    async func Read(key: string) -> ClientResponse {
+    async fn Read(key: string): ClientResponse {
         println("HandleClientRead: key=" + key);
         // A Read is also a log entry to ensure linearizability
         var cmd: Command = Command{ kind: 0, key: key, value: nil };
         return <- NewEntry(cmd);
     }
     
-    async func SimulateTimeout() {
+    async fn SimulateTimeout() {
         println("SimulateTimeout: Node " + int_to_string(self) + " timeout triggered at view " + int_to_string(view_number));
         if (status == 2) { 
             return (); 
@@ -602,7 +602,7 @@ role Node {
         }
     }
 
-    async func monitor_timeouts() {
+    async fn monitor_timeouts() {
         for ;; {
             <- set_timer();
 
@@ -630,7 +630,7 @@ role Node {
         }
     }
 
-    async func GetKVStore() -> map<string, string> {
+    async fn GetKVStore(): map<string, string> {
         return kv_store;
     }
 }
@@ -639,7 +639,7 @@ ClientInterface {
     var responses: list<(ClientResponse, string)> = [];
 
     // Sends a new write command to a specific replica, retrying on redirect.
-    async func Write(dest: Node, key: string, value: string) {
+    async fn Write(dest: Node, key: string, value: string) {
         var current_target: Node = dest;
 
         for ;; {
@@ -654,7 +654,7 @@ ClientInterface {
     }
 
     // Sends a new read command to a specific replica, retrying on redirect.
-    async func Read(dest: Node, key: string) -> string? {
+    async fn Read(dest: Node, key: string): string? {
         var current_target: Node = dest;
 
         for ;; {
@@ -670,12 +670,12 @@ ClientInterface {
     }
 
     // Gets the entire KV store from a replica (for debugging/testing).
-    async func GetKVStore(dest: Node) -> map<string, string> {
+    async fn GetKVStore(dest: Node): map<string, string> {
         return <-dest->GetKVStore();
     }
 
     // Triggers a simulated timeout at the destination node.
-    async func SimulateTimeout(dest: Node) {
+    async fn SimulateTimeout(dest: Node) {
         dest->SimulateTimeout();
     }
 }

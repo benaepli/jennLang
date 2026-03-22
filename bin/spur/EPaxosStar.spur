@@ -103,7 +103,7 @@ role Node {
 
     var node_count: int = 0;
 
-    async func Init(me: int, all: list<Node>) {
+    async fn Init(me: int, all: list<Node>) {
         self = me;
         replicas = all;
         node_count = len(replicas);
@@ -115,15 +115,15 @@ role Node {
         println("Initialized node. Node count: " + int_to_string(node_count) + " F: " + int_to_string(f) + " E: " + int_to_string(e));
     }
 
-    func fastQuorum() -> int {
+    fn fastQuorum(): int {
         return len(replicas) - e;
     }
 
-    func slowQuorum() -> int {
+    fn slowQuorum(): int {
         return len(replicas) - f;
     }
 
-    func localConflicts(c: Payload) -> DependencySet {
+    fn localConflicts(c: Payload): DependencySet {
         var result: DependencySet = {};
         for (id, command) in commands {
             var payload: Payload = command.payload;
@@ -134,7 +134,7 @@ role Node {
         return result;
     }
 
-    func conflicts(c1: Payload, c2: Payload) -> bool {
+    fn conflicts(c1: Payload, c2: Payload): bool {
         // Nop (kind 2) conflicts with everything
         if (c1.kind == 2 or c2.kind == 2) {
             return true;
@@ -142,7 +142,7 @@ role Node {
         return (c1.kind != 0 or c2.kind != 0) and (c1.key == c2.key);
     }
 
-    func union(fst: DependencySet, snd: DependencySet) -> DependencySet {
+    fn union(fst: DependencySet, snd: DependencySet): DependencySet {
         var result: DependencySet = {};
         for (id, _) in fst {
             result = result[id] := true;
@@ -154,14 +154,14 @@ role Node {
     }
 
     // Helper to check if a command is locally committed
-    func isCommitted(id: int) -> bool {
+    fn isCommitted(id: int): bool {
         if (!exists(commands, id)) {
             return false;
         }
         return commands[id].phase == 3;
     }
 
-    func depsToString(deps: DependencySet) -> string {
+    fn depsToString(deps: DependencySet): string {
         var s: string = "\{";
         var first: bool = true;
         for (id, _) in deps {
@@ -175,7 +175,7 @@ role Node {
         return s;
     }
 
-    func listIntToString(l: list<int>) -> string {
+    fn listIntToString(l: list<int>): string {
         var s: string = "[";
         var first: bool = true;
         for id in l {
@@ -191,7 +191,7 @@ role Node {
 
 
     // Submit handles starting a new request. Figure 3 of EPaxos*.
-    async func Submit(c: Payload, id: int) {
+    async fn Submit(c: Payload, id: int) {
         println("Submit: Starting request ID " + int_to_string(id) + " for key: " + c.key);
         var localDeps: DependencySet = localConflicts(c);
         
@@ -216,7 +216,7 @@ role Node {
 
 
     // PreAccept handles an incoming PreAccept request. Figure 3 of EPaxos*.
-    async func PreAccept(request: PreAcceptRequest) {
+    async fn PreAccept(request: PreAcceptRequest) {
         println("PreAccept: Received request ID " + int_to_string(request.id) + " from sender.");
         
         // Precondition: we haven't started working on it.
@@ -267,7 +267,7 @@ role Node {
     }
 
     // preAcceptOKWithQuorum handles when we have a quorum after preAccept. See figure 3 of EPaxos*. 
-    func preAcceptOKWithQuorum(id: int) {
+    fn preAcceptOKWithQuorum(id: int) {
         // Preconditions.
         if (!exists(commands, id)) { return (); }
         var command: Command = commands[id];
@@ -304,7 +304,7 @@ role Node {
     }
 
     // PreAcceptOK handles all PreAcceptOK requests and decides whether we have a quorum.
-    async func PreAcceptOK(request: PreAcceptOKRequest) {
+    async fn PreAcceptOK(request: PreAcceptOKRequest) {
         // Precondition: we haven't already moved past this phase.
         if (!exists(commands, request.id)) { return (); }
         var cmd: Command = commands[request.id];
@@ -333,13 +333,13 @@ role Node {
         }
     }
 
-    async func startOptimisticWaitTimer(id: int) {
+    async fn startOptimisticWaitTimer(id: int) {
         var timeout_ch: chan<()> = set_timer(); 
         <- timeout_ch; 
         HandleOptimisticWaitTimeout(id);
     }
 
-    func HandleOptimisticWaitTimeout(id: int) {
+    fn HandleOptimisticWaitTimeout(id: int) {
         if (!exists(commands, id)) {
             return ();
         }
@@ -354,7 +354,7 @@ role Node {
     }
 
     // Accept handles all Accept requests in the slow path (Figure 3).
-    async func Accept(request: AcceptRequest) {
+    async fn Accept(request: AcceptRequest) {
         println("Accept: Received Accept for ID " + int_to_string(request.id) + " ballot " + int_to_string(request.ballot) + " deps count: " + int_to_string(len(request.dependencies)));
         if (!exists(commands, request.id)) {
             return ();
@@ -396,7 +396,7 @@ role Node {
     }
 
     // AcceptOK handles all Accept responses in the slow path (Figure 3).
-    async func AcceptOK(request: AcceptOKRequest) {
+    async fn AcceptOK(request: AcceptOKRequest) {
         if (!exists(commands, request.id)) { return (); }
         var command: Command = commands[request.id];
         if (command.ballot != request.ballot) {
@@ -414,7 +414,7 @@ role Node {
     }
 
     // Commit handles commit requests as in Figure 3.
-    async func Commit(request: CommitRequest) {
+    async fn Commit(request: CommitRequest) {
         println("Commit: ID " + int_to_string(request.id) + " is now COMMITTED.");
         if (!exists(commands, request.id)) {
             return ();
@@ -472,7 +472,7 @@ role Node {
     // Step 1 (Figure 1, Line 2): 
     // Compute the largest subgraph G where nodes are committed and dependencies exist in G.
     // We use memoized DFS to determine validity.
-    func buildExecutionGraph() -> list<int> {
+    fn buildExecutionGraph(): list<int> {
         v_valid = {};
         v_visiting = {};
         var graphNodes: list<int> = [];
@@ -491,7 +491,7 @@ role Node {
     }
 
     // Recursive validity check for graph inclusion
-    func checkValidity(id: int) -> bool {
+    fn checkValidity(id: int): bool {
         if (exists(v_valid, id)) {
             return v_valid[id];
         }
@@ -524,7 +524,7 @@ role Node {
         return true;
     }
 
-    func getSCCs(graphNodes: list<int>) -> list<list<int>> {
+    fn getSCCs(graphNodes: list<int>): list<list<int>> {
         // Reset State
         t_index = 0;
         t_stack = [];
@@ -541,7 +541,7 @@ role Node {
         return t_sccs;
     }
 
-    func tarjanDFS(at: int) {
+    fn tarjanDFS(at: int) {
         t_stack = append(t_stack, at); // Push
         t_onStack = t_onStack[at] := true;
         t_ids = t_ids[at] := t_index;
@@ -588,7 +588,7 @@ role Node {
     }
 
     // Simple sort for IDs within an SCC (Bubble sort for simplicity)
-    func sortIDs(ids: list<int>) -> list<int> {
+    fn sortIDs(ids: list<int>): list<int> {
         var n: int = len(ids);
         var i: int = 0;
         for ;i < n - 1; {
@@ -606,7 +606,7 @@ role Node {
         return ids;
     }
 
-    func executeCommand(id: int, payload: Payload) {
+    fn executeCommand(id: int, payload: Payload) {
         if (payload.kind == 2) {
              println("ExecuteAction: ID " + int_to_string(id) + " is a NOP.");
              return ();
@@ -627,14 +627,14 @@ role Node {
         notify(id, result);
     }
 
-    async func notify(id: int, result: string?) {
+    async fn notify(id: int, result: string?) {
         if (exists(pending, id)) {
             send(pending[id], result);
             pending = erase(pending, id);
         }
     }
 
-    func TryExecute() {
+    fn TryExecute() {
         println("Execute: Building execution graph...");
         var G: list<int> = buildExecutionGraph();
         println("Execute: Graph size: " + int_to_string(len(G)));
@@ -656,18 +656,18 @@ role Node {
         }
     }
 
-    async func startRecoveryTimer(id: int) {
+    async fn startRecoveryTimer(id: int) {
         var timeout_ch: chan<()> = set_timer();
         <- timeout_ch;
         CheckAndTriggerRecovery(id);
     }
 
-    func leader_detector(id: int) -> Node {
+    fn leader_detector(id: int): Node {
         var n: int = len(replicas);
         return replicas[id % n];
     }
 
-    async func CheckAndTriggerRecovery(id: int) {
+    async fn CheckAndTriggerRecovery(id: int) {
         if exists(commands, id) and commands[id].phase != 3 {
             var leader: Node = leader_detector(id);
             if (leader == replicas[self]) {
@@ -678,14 +678,14 @@ role Node {
         }
     }
 
-    async func TryRecover(id: int) {
+    async fn TryRecover(id: int) {
         if (replicas[self] == leader_detector(id)) {
             recover(id);
         }
     }
 
     // Figure 5 of EPaxos*
-    async func recover(id: int) {
+    async fn recover(id: int) {
         println("Recovery: Initiating recovery for ID " + int_to_string(id));
         // Pick a higher ballot number to take over
         var current_bal: int = 0;
@@ -702,7 +702,7 @@ role Node {
         }
     }
 
-    func depsEqual(d1: DependencySet, d2: DependencySet) -> bool {
+    fn depsEqual(d1: DependencySet, d2: DependencySet): bool {
         if (len(d1) != len(d2)) {
             return false;
         }
@@ -714,7 +714,7 @@ role Node {
         return true;
     }
 
-    func anyInU(U: list<RecoverResponse>, phase: int) -> bool {
+    fn anyInU(U: list<RecoverResponse>, phase: int): bool {
         for r in U {
             if (r.phase == phase) {
                 return true;
@@ -723,7 +723,7 @@ role Node {
         return false;
     }
 
-    func getOneInU(U: list<RecoverResponse>, phase: int) -> RecoverResponse {
+    fn getOneInU(U: list<RecoverResponse>, phase: int): RecoverResponse {
         for r in U {
             if (r.phase == phase) {
                 return r;
@@ -733,7 +733,7 @@ role Node {
         return U[0];
     }
 
-    async func BroadcastCommit(b: int, id: int, c: Payload, D: DependencySet) {
+    async fn BroadcastCommit(b: int, id: int, c: Payload, D: DependencySet) {
         var req: CommitRequest = CommitRequest{
             sender: replicas[self],
             ballot: b,
@@ -749,7 +749,7 @@ role Node {
         }
     }
 
-    async func BroadcastAccept(b: int, id: int, c: Payload, D: DependencySet) {
+    async fn BroadcastAccept(b: int, id: int, c: Payload, D: DependencySet) {
         var req: AcceptRequest = AcceptRequest{
             sender: replicas[self],
             ballot: b,
@@ -766,7 +766,7 @@ role Node {
     }
 
     // Figure 5
-    async func Recover(b: int, id: int, q: Node) {
+    async fn Recover(b: int, id: int, q: Node) {
         if (!exists(commands, id) or commands[id].ballot < b) {
             if (!exists(commands, id)) {
                 commands = commands[id] := Command{
@@ -810,7 +810,7 @@ role Node {
     }
 
     // Figure 5
-    async func RecoverOK(request: RecoverResponse) {
+    async fn RecoverOK(request: RecoverResponse) {
         if (!exists(commands, request.id)) {
             return ();
         }
@@ -905,7 +905,7 @@ role Node {
         }
     }
 
-    async func StartValidation(b: int, id: int, c: Payload, D: DependencySet) {
+    async fn StartValidation(b: int, id: int, c: Payload, D: DependencySet) {
         <- HandleValidate(b, id, c, D, replicas[self]);
         for node in replicas {
             if (node != replicas[self]) {
@@ -914,7 +914,7 @@ role Node {
         }
     }
 
-    async func HandleValidate(b: int, id: int, c: Payload, D: DependencySet, q: Node) {
+    async fn HandleValidate(b: int, id: int, c: Payload, D: DependencySet, q: Node) {
         if (commands[id].ballot == b) {
             // Collect local "invalidating" commands.
             var I: list<int> = findLocalInvalidators(id, c, D);
@@ -922,7 +922,7 @@ role Node {
         }
     }
 
-    func findLocalInvalidators(id: int, c: Payload, D: DependencySet) -> list<int> {
+    fn findLocalInvalidators(id: int, c: Payload, D: DependencySet): list<int> {
         var I: list<int> = [];
 
         for (id_prime, cmd_prime) in commands {
@@ -958,7 +958,7 @@ role Node {
         return I;
     }
 
-    async func HandleValidateOK(b: int, id: int, I_from_q: list<int>) {
+    async fn HandleValidateOK(b: int, id: int, I_from_q: list<int>) {
         if (!exists(commands, id)) {
             return ();
         }
@@ -1014,7 +1014,7 @@ role Node {
         }
     }
 
-    func BroadcastWaiting(id: int) {
+    fn BroadcastWaiting(id: int) {
         if (!exists(commands, id)) { return (); }
         var cmd: Command = commands[id];
 
@@ -1031,7 +1031,7 @@ role Node {
         }
     }
 
-    async func HandleWaiting(req: WaitingRequest) {
+    async fn HandleWaiting(req: WaitingRequest) {
         // Iterate over all commands we are currently recovering/waiting on
         for (my_id, my_cmd) in commands {
             if (my_cmd.isWaiting and my_cmd.ballot > 0) {
@@ -1055,7 +1055,7 @@ role Node {
     }
 
 
-    async func ClientWrite(key: string, value: string) -> string? {
+    async fn ClientWrite(key: string, value: string): string? {
         var id: int = unique_id();
         var p: chan<string?> = make();
         pending = pending[id] := p;
@@ -1066,7 +1066,7 @@ role Node {
         return <-p;
     }
 
-    async func ClientRead(key: string) -> string? {
+    async fn ClientRead(key: string): string? {
         var id: int = unique_id();
         var p: chan<string?> = make();
         pending = pending[id] := p;
@@ -1079,12 +1079,12 @@ role Node {
 }
 
 ClientInterface {
-    async func Read(dest: Node, key: string) -> string? {
+    async fn Read(dest: Node, key: string): string? {
         var promise: chan<string?> = dest->ClientRead(key);
         return <-promise;
     }
 
-    async func Write(dest: Node, key: string, value: string) {
+    async fn Write(dest: Node, key: string, value: string) {
         var promise: chan<string?> = dest->ClientWrite(key, value);
         <-promise;
     }
